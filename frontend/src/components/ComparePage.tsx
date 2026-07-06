@@ -28,6 +28,7 @@ export default function ComparePage() {
       const gray = await api.spectrum(id, {
         kind: "magnitude", channel: "luma", window: "hann",
         scale: "log", gamma: 0.5, clip_lo: 0.1, clip_hi: 99.9,
+        preprocess: "none", pre_amount: 1.0,
       });
       const spectrum = await applyColormap(gray, "viridis");
       (which === "a" ? setA : setB)({ id, meta, spectrum });

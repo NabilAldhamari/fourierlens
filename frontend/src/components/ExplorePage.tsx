@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { api } from "../api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { api, isAbort, type AppConfig } from "../api";
 import { applyColormap } from "../colormaps";
 import { ACCENT, drawAnnotation, drawAnomalyMarkers, drawCrosshair, drawSpec } from "../draw";
 import { useExplore } from "../store";
 import type { Annotation, AnomalyFlag, HoverInfo, MaskSpec } from "../types";
-import CanvasPanel, { type PanelPointer } from "./CanvasPanel";
-import { OverlayControls, SpectrumControls, Toolbar } from "./Controls";
+import CanvasPanel, { createSharedView, type PanelPointer } from "./CanvasPanel";
+import { OverlayControls, PreprocessControls, SpectrumControls, Toolbar, ToolHintBar } from "./Controls";
 import GratingPreview from "./GratingPreview";
 import { AnnotationsTab, AnomaliesTab, MetricsTab, SelectionsTab } from "./Sidebar";
 
@@ -16,8 +16,16 @@ interface PendingAnnotation {
   shape: Annotation["shape"];
 }
 
-export default function ExplorePage({ windowDescriptions }: { windowDescriptions: Record<string, string> }) {
+export default function ExplorePage({
+  windowDescriptions,
+  preprocessOps,
+}: {
+  windowDescriptions: Record<string, string>;
+  preprocessOps: AppConfig["preprocess"];
+}) {
   const s = useExplore();
+  // one transform shared by both panels: zoom/pan anywhere moves both together
+  const sharedView = useMemo(createSharedView, []);
   const [samples, setSamples] = useState<{ name: string }[]>([]);
   const [busy, setBusy] = useState(false);
 
@@ -92,39 +100,48 @@ export default function ExplorePage({ windowDescriptions }: { windowDescriptions
 
   // ------------------------------------------------------------------ fetch effects
 
-  // base pixels
+  // base pixels (shows the pre-filtered channel when a pre-filter is active,
+  // so the left panel is always exactly what the spectrum analyzes)
   useEffect(() => {
     if (!s.imageId) return;
-    let live = true;
-    api.pixels(s.imageId).then((bm) => live && setPixelBitmap(bm)).catch(() => {});
-    return () => {
-      live = false;
-    };
-  }, [s.imageId]);
+    const ctl = new AbortController();
+    api
+      .pixels(s.imageId, "rgb", { preprocess: s.preprocess, pre_amount: s.preAmount }, ctl.signal)
+      .then((bm) => setPixelBitmap(bm))
+      .catch((e) => !isAbort(e) && s.set({ error: `image view: ${e instanceof Error ? e.message : e}` }));
+    return () => ctl.abort();
+  }, [s.imageId, s.preprocess, s.preAmount]);
 
-  // spectrum (debounced: sliders fire fast)
+  // spectrum (debounced: sliders fire fast; superseded requests are aborted so
+  // they neither pile up on the server nor surface as errors)
   useEffect(() => {
     if (!s.imageId) return;
-    let live = true;
+    const ctl = new AbortController();
     const t = setTimeout(() => {
       api
-        .spectrum(s.imageId!, {
-          kind: s.kind,
-          channel: s.channel,
-          window: s.window,
-          scale: s.scale,
-          gamma: s.gamma,
-          clip_lo: s.clipLo,
-          clip_hi: s.clipHi,
-        })
-        .then((bm) => live && setSpectrumGray(bm))
-        .catch((e) => live && s.set({ error: String(e) }));
+        .spectrum(
+          s.imageId!,
+          {
+            kind: s.kind,
+            channel: s.channel,
+            window: s.window,
+            scale: s.scale,
+            gamma: s.gamma,
+            clip_lo: s.clipLo,
+            clip_hi: s.clipHi,
+            preprocess: s.preprocess,
+            pre_amount: s.preAmount,
+          },
+          ctl.signal,
+        )
+        .then((bm) => setSpectrumGray(bm))
+        .catch((e) => !isAbort(e) && s.set({ error: `spectrum: ${e instanceof Error ? e.message : e}` }));
     }, 120);
     return () => {
-      live = false;
       clearTimeout(t);
+      ctl.abort();
     };
-  }, [s.imageId, s.kind, s.channel, s.window, s.scale, s.gamma, s.clipLo, s.clipHi]);
+  }, [s.imageId, s.kind, s.channel, s.window, s.scale, s.gamma, s.clipLo, s.clipHi, s.preprocess, s.preAmount]);
 
   // colorize spectrum client-side
   useEffect(() => {
@@ -140,12 +157,13 @@ export default function ExplorePage({ windowDescriptions }: { windowDescriptions
   useEffect(() => {
     if (!s.imageId) return;
     let live = true;
-    api.metrics(s.imageId, s.channel).then((m) => live && s.set({ metrics: m })).catch(() => {});
-    api.anomalies(s.imageId, s.channel).then((a) => live && s.set({ anomalies: a })).catch(() => {});
+    const pre = { preprocess: s.preprocess, pre_amount: s.preAmount };
+    api.metrics(s.imageId, s.channel, pre).then((m) => live && s.set({ metrics: m })).catch(() => {});
+    api.anomalies(s.imageId, s.channel, pre).then((a) => live && s.set({ anomalies: a })).catch(() => {});
     return () => {
       live = false;
     };
-  }, [s.imageId, s.channel]);
+  }, [s.imageId, s.channel, s.preprocess, s.preAmount]);
 
   // band-energy overlay (frequency -> pixel localization)
   useEffect(() => {
@@ -154,26 +172,32 @@ export default function ExplorePage({ windowDescriptions }: { windowDescriptions
       setOverlayBitmap(null);
       return;
     }
-    let live = true;
+    const ctl = new AbortController();
     const t = setTimeout(() => {
       api
-        .bandEnergy(s.imageId!, {
-          specs: s.selections,
-          invert: s.invert,
-          soft_px: s.softPx,
-          channel: s.channel,
-          // always the unwindowed FFT: a window's taper would masquerade as
-          // "energy fading toward the borders" in the localization map
-          window: "none",
-        })
-        .then((bm) => live && setOverlayGray(bm))
-        .catch(() => {});
+        .bandEnergy(
+          s.imageId!,
+          {
+            specs: s.selections,
+            invert: s.invert,
+            soft_px: s.softPx,
+            channel: s.channel,
+            // always the unwindowed FFT: a window's taper would masquerade as
+            // "energy fading toward the borders" in the localization map
+            window: "none",
+            preprocess: s.preprocess,
+            pre_amount: s.preAmount,
+          },
+          ctl.signal,
+        )
+        .then((bm) => setOverlayGray(bm))
+        .catch((e) => !isAbort(e) && s.set({ error: `overlay: ${e instanceof Error ? e.message : e}` }));
     }, 150);
     return () => {
-      live = false;
       clearTimeout(t);
+      ctl.abort();
     };
-  }, [s.imageId, s.selections, s.invert, s.softPx, s.channel, hasSelection]);
+  }, [s.imageId, s.selections, s.invert, s.softPx, s.channel, s.preprocess, s.preAmount, hasSelection]);
 
   useEffect(() => {
     if (!overlayGray) {
@@ -193,24 +217,30 @@ export default function ExplorePage({ windowDescriptions }: { windowDescriptions
       setFilteredBitmap(null);
       return;
     }
-    let live = true;
+    const ctl = new AbortController();
     const t = setTimeout(() => {
       api
-        .filtered(s.imageId!, {
-          specs: s.selections,
-          invert: s.invert,
-          soft_px: s.softPx,
-          channel: s.channel,
-          window: "none", // reconstructions must not inherit the display window's vignette
-        })
-        .then((bm) => live && setFilteredBitmap(bm))
-        .catch(() => {});
+        .filtered(
+          s.imageId!,
+          {
+            specs: s.selections,
+            invert: s.invert,
+            soft_px: s.softPx,
+            channel: s.channel,
+            window: "none", // reconstructions must not inherit the display window's vignette
+            preprocess: s.preprocess,
+            pre_amount: s.preAmount,
+          },
+          ctl.signal,
+        )
+        .then((bm) => setFilteredBitmap(bm))
+        .catch((e) => !isAbort(e) && s.set({ error: `filter: ${e instanceof Error ? e.message : e}` }));
     }, 150);
     return () => {
-      live = false;
       clearTimeout(t);
+      ctl.abort();
     };
-  }, [s.imageId, s.pixelView, s.selections, s.invert, s.softPx, s.channel, hasSelection]);
+  }, [s.imageId, s.pixelView, s.selections, s.invert, s.softPx, s.channel, s.preprocess, s.preAmount, hasSelection]);
 
   // progressive reconstruction
   useEffect(() => {
@@ -218,18 +248,25 @@ export default function ExplorePage({ windowDescriptions }: { windowDescriptions
       setProgressiveBitmap(null);
       return;
     }
-    let live = true;
+    const ctl = new AbortController();
     const t = setTimeout(() => {
       api
-        .reconstruct(s.imageId!, s.progressiveFraction, s.channel, "none")
-        .then((bm) => live && setProgressiveBitmap(bm))
-        .catch(() => {});
+        .reconstruct(
+          s.imageId!,
+          s.progressiveFraction,
+          s.channel,
+          "none",
+          { preprocess: s.preprocess, pre_amount: s.preAmount },
+          ctl.signal,
+        )
+        .then((bm) => setProgressiveBitmap(bm))
+        .catch((e) => !isAbort(e) && s.set({ error: `rebuild: ${e instanceof Error ? e.message : e}` }));
     }, 100);
     return () => {
-      live = false;
       clearTimeout(t);
+      ctl.abort();
     };
-  }, [s.imageId, s.pixelView, s.progressiveFraction, s.channel]);
+  }, [s.imageId, s.pixelView, s.progressiveFraction, s.channel, s.preprocess, s.preAmount]);
 
   // localized patch spectrum (pixel -> frequency)
   useEffect(() => {
@@ -237,22 +274,29 @@ export default function ExplorePage({ windowDescriptions }: { windowDescriptions
       setPatchBitmap(null);
       return;
     }
-    let live = true;
-    const { width, height } = s.meta;
+    const ctl = new AbortController();
+    // ROI coordinates are normalized; the server works on the (possibly
+    // downscaled) analysis copy, so convert using the analysis dimensions
+    const width = (s.meta.analysis_width as number | undefined) ?? s.meta.width;
+    const height = (s.meta.analysis_height as number | undefined) ?? s.meta.height;
     api
-      .patchSpectrum(s.imageId, {
-        x: Math.round(s.roiRect.x * width),
-        y: Math.round(s.roiRect.y * height),
-        w: Math.round(s.roiRect.w * width),
-        h: Math.round(s.roiRect.h * height),
-        channel: s.channel,
-      })
-      .then((bm) => live && setPatchBitmap(bm))
-      .catch(() => {});
-    return () => {
-      live = false;
-    };
-  }, [s.imageId, s.roiRect, s.channel, s.meta]);
+      .patchSpectrum(
+        s.imageId,
+        {
+          x: Math.round(s.roiRect.x * width),
+          y: Math.round(s.roiRect.y * height),
+          w: Math.round(s.roiRect.w * width),
+          h: Math.round(s.roiRect.h * height),
+          channel: s.channel,
+          preprocess: s.preprocess,
+          pre_amount: s.preAmount,
+        },
+        ctl.signal,
+      )
+      .then((bm) => setPatchBitmap(bm))
+      .catch((e) => !isAbort(e) && s.set({ error: `region FFT: ${e instanceof Error ? e.message : e}` }));
+    return () => ctl.abort();
+  }, [s.imageId, s.roiRect, s.channel, s.meta, s.preprocess, s.preAmount]);
 
   // ------------------------------------------------------------------ keyboard
 
@@ -441,7 +485,25 @@ export default function ExplorePage({ windowDescriptions }: { windowDescriptions
         }
         return;
       }
-      if (tool !== "roi") return;
+      if (tool === "pan") return;
+
+      // Every shape tool doubles as a spatial inspector on the image panel:
+      // dragging (or clicking with the point tool) opens the local spectrum
+      // of that region — the pixel→frequency direction.
+      if (tool === "point") {
+        if (e.kind === "down") {
+          const half = 0.08; // ~16% of the image around the clicked pixel
+          s.set({
+            roiRect: {
+              x: Math.max(0, e.nx - half),
+              y: Math.max(0, e.ny - half),
+              w: half * 2,
+              h: half * 2,
+            },
+          });
+        }
+        return;
+      }
       if (e.kind === "down") {
         dragStart.current = { nx: e.nx, ny: e.ny };
       } else if (e.kind === "move" && e.buttons & 1 && dragStart.current) {
@@ -500,10 +562,10 @@ export default function ExplorePage({ windowDescriptions }: { windowDescriptions
         ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
         ctx.setLineDash([]);
       }
-      if (draftAnn && (s.tool === "annotate" || s.tool === "roi")) {
+      if (draftAnn && s.tool !== "pan") {
         const [x0, y0] = map(draftAnn.x, draftAnn.y);
         const [x1, y1] = map(draftAnn.x + draftAnn.w, draftAnn.y + draftAnn.h);
-        ctx.strokeStyle = s.tool === "roi" ? "#4ade80" : ACCENT;
+        ctx.strokeStyle = s.tool === "annotate" ? ACCENT : "#4ade80";
         ctx.setLineDash([4, 3]);
         ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
         ctx.setLineDash([]);
@@ -591,6 +653,8 @@ export default function ExplorePage({ windowDescriptions }: { windowDescriptions
       ) : (
         <>
           <Toolbar />
+          <ToolHintBar />
+          <PreprocessControls ops={preprocessOps} />
           <SpectrumControls windowDescriptions={windowDescriptions} />
           <OverlayControls />
           <div className="panels">
@@ -615,7 +679,10 @@ export default function ExplorePage({ windowDescriptions }: { windowDescriptions
                 drawExtras={drawImageExtras}
                 onPointer={imagePointer}
                 panWithLeft={s.tool === "pan"}
-                cursor={s.tool === "roi" || s.tool === "annotate" ? "crosshair" : "default"}
+                cursor="crosshair"
+                shared={sharedView}
+                primary
+                fitId={s.imageId ?? ""}
               />
             </section>
             <section className="panel">
@@ -631,6 +698,8 @@ export default function ExplorePage({ windowDescriptions }: { windowDescriptions
                 drawExtras={drawSpectrumExtras}
                 onPointer={spectrumPointer}
                 panWithLeft={s.tool === "pan"}
+                shared={sharedView}
+                fitId={s.imageId ?? ""}
               />
               {patchBitmap && (
                 <div className="patch-card">
@@ -706,6 +775,15 @@ function HeaderBar({ samples, busy, onSample, onUpload, onSaveSession, onLoadSes
         <span className="meta-chip" title={`sha256 ${meta.sha256}`}>
           {meta.filename} · {meta.width}×{meta.height} · {meta.format} {meta.bit_depth}-bit
           {meta.n_channels === 1 ? " · gray" : ""}
+          {meta.downscaled_for_analysis && (
+            <em
+              className="warn"
+              title="Large images are analyzed on a downscaled copy so the explorer stays interactive. Use the CLI (fourierlens analyze / batch) for full-resolution numbers."
+            >
+              {" "}
+              · analyzed at {meta.analysis_width}×{meta.analysis_height}
+            </em>
+          )}
         </span>
       )}
       <span className="spacer" />

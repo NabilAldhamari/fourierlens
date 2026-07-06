@@ -10,6 +10,10 @@ export interface ImageMeta {
   file_size_bytes: number;
   sha256: string;
   path?: string;
+  /** interactive analysis runs on a copy capped at 2048px on the long side */
+  analysis_width?: number;
+  analysis_height?: number;
+  downscaled_for_analysis?: boolean;
 }
 
 export type Channel = "luma" | "r" | "g" | "b";

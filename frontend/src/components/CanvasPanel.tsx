@@ -14,6 +14,31 @@ export interface ViewTransform {
   oy: number;
 }
 
+/** Mutable view transform shared by multiple panels: zooming/panning one panel
+ * moves all subscribers. Lives outside React state on purpose - pan events fire
+ * per mousemove and must not trigger re-renders. */
+export interface SharedView {
+  v: ViewTransform;
+  fitKey: string;
+  subscribe(fn: () => void): () => void;
+  notify(): void;
+}
+
+export function createSharedView(): SharedView {
+  const listeners = new Set<() => void>();
+  return {
+    v: { zoom: 1, ox: 0, oy: 0 },
+    fitKey: "",
+    subscribe(fn) {
+      listeners.add(fn);
+      return () => listeners.delete(fn);
+    },
+    notify() {
+      listeners.forEach((fn) => fn());
+    },
+  };
+}
+
 interface Props {
   bitmap: ImageBitmap | null;
   /** colorized energy overlay drawn on top of the bitmap */
@@ -34,6 +59,17 @@ interface Props {
   cursor?: string;
   /** bump to re-render the vector layer without other prop changes */
   extrasKey?: unknown;
+  /** link this panel's zoom/pan to other panels sharing the same object */
+  shared?: SharedView;
+  /** with a shared view, exactly ONE panel must be primary: it owns the
+   * fit-to-view calculation. Secondary panels only read the shared transform,
+   * so the two panels never fight over slightly different pixel sizes. */
+  primary?: boolean;
+  /** identity of the loaded content (e.g. image id). Auto-fit runs only when
+   * this or the bitmap dimensions change — NOT when the panel resizes, so
+   * layout shifts (hint bar growing, sidebar toggling, tool switches) never
+   * reset the user's zoom. */
+  fitId?: string;
 }
 
 /** Zoomable/pannable canvas used by both the pixel and spectrum panels. */
@@ -47,12 +83,30 @@ export default function CanvasPanel({
   panWithLeft = false,
   cursor = "crosshair",
   extrasKey,
+  shared,
+  primary = false,
+  fitId = "",
 }: Props) {
+  // the panel that owns the fit: the primary when linked, else always (unlinked)
+  const ownsFit = !shared || primary;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
-  const view = useRef<ViewTransform>({ zoom: 1, ox: 0, oy: 0 });
-  const fitted = useRef<string>("");
+  const localView = useRef<ViewTransform>({ zoom: 1, ox: 0, oy: 0 });
+  const localFit = useRef<string>("");
   const dragging = useRef<{ mode: "pan" | "tool"; lastX: number; lastY: number } | null>(null);
+
+  const getView = useCallback((): ViewTransform => (shared ? shared.v : localView.current), [shared]);
+  const setView = useCallback(
+    (v: ViewTransform) => {
+      if (shared) {
+        shared.v = v;
+        shared.notify(); // redraws every linked panel, including this one
+      } else {
+        localView.current = v;
+      }
+    },
+    [shared],
+  );
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -73,18 +127,25 @@ export default function CanvasPanel({
       return;
     }
 
-    // fit once per bitmap identity/panel size
-    const fitKey = `${bitmap.width}x${bitmap.height}:${cw}x${ch}`;
-    if (fitted.current !== fitKey) {
-      fitted.current = fitKey;
-      const s = Math.min(cw / bitmap.width, ch / bitmap.height) * 0.96;
-      view.current = {
-        zoom: s,
-        ox: (cw - bitmap.width * s) / 2,
-        oy: (ch - bitmap.height * s) / 2,
-      };
+    // Only the fit-owner (re)computes the transform, keyed on the CONTENT
+    // identity (fitId + bitmap dims) — never on the panel's pixel size.
+    // Panel resizes (hint bar growing, tool switches, window resizes) keep the
+    // user's zoom/pan; only loading different content refits.
+    if (ownsFit && cw > 50 && ch > 50) {
+      const fitKey = `${fitId}:${bitmap.width}x${bitmap.height}`;
+      const currentKey = shared ? shared.fitKey : localFit.current;
+      if (currentKey !== fitKey) {
+        if (shared) shared.fitKey = fitKey;
+        else localFit.current = fitKey;
+        const s = Math.min(cw / bitmap.width, ch / bitmap.height) * 0.96;
+        setView({
+          zoom: s,
+          ox: (cw - bitmap.width * s) / 2,
+          oy: (ch - bitmap.height * s) / 2,
+        });
+      }
     }
-    const { zoom, ox, oy } = view.current;
+    const { zoom, ox, oy } = getView();
     const w = bitmap.width * zoom;
     const h = bitmap.height * zoom;
     ctx.imageSmoothingEnabled = zoom < 3;
@@ -117,11 +178,17 @@ export default function CanvasPanel({
       const map = (nx: number, ny: number): [number, number] => [ox + nx * w, oy + ny * h];
       drawExtras(ctx, map, zoom);
     }
-  }, [bitmap, overlay, overlayOpacity, compare, drawExtras, extrasKey]);
+  }, [bitmap, overlay, overlayOpacity, compare, drawExtras, extrasKey, shared, ownsFit, fitId, getView, setView]);
 
   useEffect(() => {
     draw();
   }, [draw]);
+
+  // linked panels redraw when any of them changes the shared transform
+  useEffect(() => {
+    if (!shared) return;
+    return shared.subscribe(draw);
+  }, [shared, draw]);
 
   useEffect(() => {
     const wrap = wrapRef.current;
@@ -138,12 +205,12 @@ export default function CanvasPanel({
       const dpr = window.devicePixelRatio || 1;
       const cx = (clientX - rect.left) * dpr;
       const cy = (clientY - rect.top) * dpr;
-      const { zoom, ox, oy } = view.current;
+      const { zoom, ox, oy } = getView();
       const bw = bitmap?.width ?? 1;
       const bh = bitmap?.height ?? 1;
       return [(cx - ox) / (bw * zoom), (cy - oy) / (bh * zoom)];
     },
-    [bitmap],
+    [bitmap, getView],
   );
 
   const handleWheel = useCallback(
@@ -155,13 +222,13 @@ export default function CanvasPanel({
       const dpr = window.devicePixelRatio || 1;
       const cx = (e.clientX - rect.left) * dpr;
       const cy = (e.clientY - rect.top) * dpr;
-      const v = view.current;
+      const v = getView();
       const newZoom = Math.max(0.05, Math.min(200, v.zoom * factor));
       const k = newZoom / v.zoom;
-      view.current = { zoom: newZoom, ox: cx - (cx - v.ox) * k, oy: cy - (cy - v.oy) * k };
-      draw();
+      setView({ zoom: newZoom, ox: cx - (cx - v.ox) * k, oy: cy - (cy - v.oy) * k });
+      if (!shared) draw();
     },
-    [bitmap, draw],
+    [bitmap, draw, getView, setView, shared],
   );
 
   const pointerNorm = (e: React.PointerEvent, kind: PanelPointer["kind"]) => {
@@ -184,11 +251,15 @@ export default function CanvasPanel({
     const drag = dragging.current;
     if (drag?.mode === "pan") {
       const dpr = window.devicePixelRatio || 1;
-      view.current.ox += (e.clientX - drag.lastX) * dpr;
-      view.current.oy += (e.clientY - drag.lastY) * dpr;
+      const v = getView();
+      setView({
+        zoom: v.zoom,
+        ox: v.ox + (e.clientX - drag.lastX) * dpr,
+        oy: v.oy + (e.clientY - drag.lastY) * dpr,
+      });
       drag.lastX = e.clientX;
       drag.lastY = e.clientY;
-      draw();
+      if (!shared) draw();
       return;
     }
     pointerNorm(e, "move");

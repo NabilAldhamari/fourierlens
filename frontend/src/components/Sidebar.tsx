@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useExplore } from "../store";
 import type { AnomalyFlag, Metrics } from "../types";
 import { OrientationChart, RadialProfileChart } from "./Charts";
+import { UI_ICONS } from "./Icons";
 
 const SCALAR_LABELS: Record<string, string> = {
   spectral_slope: "Spectral slope α",
@@ -68,8 +69,8 @@ export function AnomaliesTab({ flags, onLocate }: { flags: AnomalyFlag[]; onLoca
           </summary>
           <p>{f.explanation}</p>
           {f.locations.length > 0 && (
-            <button className="btn small" onClick={() => onLocate(f)}>
-              ◉ Highlight peaks &amp; show in image
+            <button className="btn small locate-btn" onClick={() => onLocate(f)}>
+              {UI_ICONS.locate} Highlight peaks &amp; show in image
             </button>
           )}
         </details>

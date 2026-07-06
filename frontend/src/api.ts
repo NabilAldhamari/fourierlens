@@ -29,8 +29,23 @@ async function bitmapFrom(res: Response): Promise<ImageBitmap> {
   return createImageBitmap(await res.blob());
 }
 
+export interface AppConfig {
+  windows: Record<string, string>;
+  metrics: Record<string, { label: string; group: string }>;
+  preprocess: Record<string, { label: string; uses_amount: boolean; description: string }>;
+  channels: string[];
+  scales: string[];
+  extensions: string[];
+}
+
+/** Pre-filter parameters attached to every analysis request. */
+export interface PreQuery {
+  preprocess: string;
+  pre_amount: number;
+}
+
 export const api = {
-  config: () => json<Record<string, never> & { windows: Record<string, string>; metrics: Record<string, { label: string; group: string }> }>("/config"),
+  config: () => json<AppConfig>("/config"),
   samples: () => json<{ name: string; filename: string }[]>("/samples"),
   loadSample: (name: string) => post<{ id: string; meta: ImageMeta }>("/images/sample", { path: name }),
   loadFromPath: (path: string) => post<{ id: string; meta: ImageMeta }>("/images/from-path", { path }),
@@ -43,40 +58,72 @@ export const api = {
     return res.json();
   },
 
-  pixels: (id: string, channel = "rgb") =>
-    fetch(`${BASE}/images/${id}/pixels.png?channel=${channel}`).then(bitmapFrom),
+  pixels: (id: string, channel = "rgb", pre?: PreQuery, signal?: AbortSignal) =>
+    fetch(
+      `${BASE}/images/${id}/pixels.png?channel=${channel}` +
+        (pre ? `&preprocess=${pre.preprocess}&pre_amount=${pre.pre_amount}` : ""),
+      { signal },
+    ).then(bitmapFrom),
 
   spectrum: (
     id: string,
-    q: { kind: string; channel: string; window: string; scale: string; gamma: number; clip_lo: number; clip_hi: number },
+    q: {
+      kind: string;
+      channel: string;
+      window: string;
+      scale: string;
+      gamma: number;
+      clip_lo: number;
+      clip_hi: number;
+    } & PreQuery,
+    signal?: AbortSignal,
   ) => {
     const params = new URLSearchParams(Object.entries(q).map(([k, v]) => [k, String(v)]));
-    return fetch(`${BASE}/images/${id}/spectrum.png?${params}`).then(bitmapFrom);
+    return fetch(`${BASE}/images/${id}/spectrum.png?${params}`, { signal }).then(bitmapFrom);
   },
 
-  bandEnergy: (id: string, body: { specs: MaskSpec[]; invert?: boolean; soft_px?: number; channel: string; window: string }) =>
+  bandEnergy: (
+    id: string,
+    body: { specs: MaskSpec[]; invert?: boolean; soft_px?: number; channel: string; window: string } & PreQuery,
+    signal?: AbortSignal,
+  ) =>
     fetch(`${BASE}/images/${id}/band-energy.png`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      signal,
     }).then(bitmapFrom),
 
-  filtered: (id: string, body: { specs: MaskSpec[]; invert?: boolean; soft_px?: number; channel: string; window: string }) =>
+  filtered: (
+    id: string,
+    body: { specs: MaskSpec[]; invert?: boolean; soft_px?: number; channel: string; window: string } & PreQuery,
+    signal?: AbortSignal,
+  ) =>
     fetch(`${BASE}/images/${id}/filter.png`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      signal,
     }).then(bitmapFrom),
 
-  patchSpectrum: (id: string, body: { x: number; y: number; w: number; h: number; channel: string }) =>
+  patchSpectrum: (
+    id: string,
+    body: { x: number; y: number; w: number; h: number; channel: string } & PreQuery,
+    signal?: AbortSignal,
+  ) =>
     fetch(`${BASE}/images/${id}/patch-spectrum.png`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      signal,
     }).then(bitmapFrom),
 
-  reconstruct: (id: string, fraction: number, channel: string, window: string) =>
-    fetch(`${BASE}/images/${id}/reconstruct.png?fraction=${fraction}&channel=${channel}&window=${window}`).then(bitmapFrom),
+  reconstruct: (id: string, fraction: number, channel: string, window: string, pre: PreQuery, signal?: AbortSignal) =>
+    fetch(
+      `${BASE}/images/${id}/reconstruct.png?fraction=${fraction}&channel=${channel}&window=${window}` +
+        `&preprocess=${pre.preprocess}&pre_amount=${pre.pre_amount}`,
+      { signal },
+    ).then(bitmapFrom),
 
   compareDiff: (idA: string, idB: string, channel: string) =>
     fetch(`${BASE}/compare/diff.png`, {
@@ -85,8 +132,12 @@ export const api = {
       body: JSON.stringify({ id_a: idA, id_b: idB, channel }),
     }).then(bitmapFrom),
 
-  metrics: (id: string, channel: string) => json<Metrics>(`/images/${id}/metrics?channel=${channel}`),
-  anomalies: (id: string, channel: string) => json<AnomalyFlag[]>(`/images/${id}/anomalies?channel=${channel}`),
+  metrics: (id: string, channel: string, pre: PreQuery) =>
+    json<Metrics>(`/images/${id}/metrics?channel=${channel}&preprocess=${pre.preprocess}&pre_amount=${pre.pre_amount}`),
+  anomalies: (id: string, channel: string, pre: PreQuery) =>
+    json<AnomalyFlag[]>(
+      `/images/${id}/anomalies?channel=${channel}&preprocess=${pre.preprocess}&pre_amount=${pre.pre_amount}`,
+    ),
 
   fsList: (path: string) =>
     json<{ path: string; parent: string | null; dirs: string[]; image_count: number }>(
@@ -101,6 +152,11 @@ export const api = {
   jobExportUrl: (jobId: string, format: string) => `${BASE}/jobs/${jobId}/export?format=${format}`,
   jobMeanSpectrum: (jobId: string) => fetch(`${BASE}/jobs/${jobId}/mean-spectrum.png`).then(bitmapFrom),
 };
+
+/** True for fetches cancelled by an AbortController (never worth surfacing). */
+export function isAbort(e: unknown): boolean {
+  return e instanceof DOMException && e.name === "AbortError";
+}
 
 /** Debounce helper for slider-driven server requests. */
 export function debounce<A extends unknown[]>(fn: (...args: A) => void, ms: number): (...args: A) => void {

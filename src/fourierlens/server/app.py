@@ -26,17 +26,38 @@ from ..core.anomalies import detect_all
 from ..core.io import SUPPORTED_EXTENSIONS, load_image, load_image_bytes
 from ..core.masks import build_mask, mask_preview
 from ..core.metrics import METRIC_INFO, compute_metrics
+from ..core.preprocess import describe_ops
 from ..core.windows import describe_windows
 from .jobs import JobManager
 from .store import ImageStore
 
-SAMPLES_DIR = Path(__file__).resolve().parents[3] / "samples"
+def _find_samples_dir() -> Path:
+    """Samples ship inside the package for installed wheels, but live at the repo
+    root in a dev checkout. Prefer whichever actually contains images."""
+    packaged = Path(__file__).resolve().parent.parent / "samples"  # src/fourierlens/samples
+    repo_root = Path(__file__).resolve().parents[3] / "samples"
+    for candidate in (packaged, repo_root):
+        if candidate.is_dir() and any(candidate.iterdir()):
+            return candidate
+    return packaged  # default; list_samples handles a missing dir gracefully
+
+
+SAMPLES_DIR = _find_samples_dir()
 WEBUI_DIR = Path(__file__).resolve().parent.parent / "webui"
 
 store = ImageStore()
 jobs = JobManager()
 
 app = FastAPI(title="FourierLens", version=__version__)
+
+
+@app.exception_handler(ValueError)
+async def _value_error_as_422(_request, exc: ValueError):
+    """Core modules raise ValueError for bad user input (unknown preprocess op,
+    window, mask type...). Surface those as 422 with the message, not a 500."""
+    return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],  # vite dev server
@@ -51,7 +72,9 @@ app.add_middleware(
 def _png(arr: np.ndarray) -> Response:
     mode = "L" if arr.ndim == 2 else "RGB"
     buf = BytesIO()
-    Image.fromarray(arr, mode=mode).save(buf, "PNG")
+    # compress_level=2: ~4x faster to encode than the default 6 on megapixel
+    # views; a few % larger over localhost is a trade worth making everywhere
+    Image.fromarray(arr, mode=mode).save(buf, "PNG", compress_level=2)
     return Response(content=buf.getvalue(), media_type="image/png")
 
 
@@ -73,6 +96,8 @@ class MaskRequest(BaseModel):
     soft_px: float = 0.0
     channel: str = "luma"
     window: str = "none"
+    preprocess: str = "none"
+    pre_amount: float = 1.0
 
 
 class PatchRequest(BaseModel):
@@ -82,6 +107,8 @@ class PatchRequest(BaseModel):
     h: int
     window: str = "hann"
     channel: str = "luma"
+    preprocess: str = "none"
+    pre_amount: float = 1.0
 
 
 class PathRequest(BaseModel):
@@ -110,6 +137,7 @@ def config() -> dict:
         "channels": ["luma", "r", "g", "b"],
         "scales": list(ffx.SCALE_MODES),
         "extensions": sorted(SUPPORTED_EXTENSIONS),
+        "preprocess": describe_ops(),
     }
 
 
@@ -169,8 +197,13 @@ def image_meta(image_id: str) -> dict:
 # views (PNG)
 
 @app.get("/api/images/{image_id}/pixels.png")
-def pixels_png(image_id: str, channel: str = "rgb"):
+def pixels_png(image_id: str, channel: str = "rgb", preprocess: str = "none", pre_amount: float = 1.0):
+    """Display image. With a pre-filter active, shows the *analyzed* (filtered)
+    channel so the left panel is always what the spectrum is computed from."""
     record = _record(image_id)
+    if preprocess != "none":
+        chan = "luma" if channel == "rgb" else channel
+        return _png(ffx.to_uint8(record.channel(chan, preprocess, pre_amount)))
     if channel == "rgb":
         return _png(_display_rgb(record.pixels))
     return _png(ffx.to_uint8(record.channel(channel)))
@@ -186,9 +219,11 @@ def spectrum_png(
     gamma: float = 0.5,
     clip_lo: float = 0.1,
     clip_hi: float = 99.9,
+    preprocess: str = "none",
+    pre_amount: float = 1.0,
 ):
     record = _record(image_id)
-    F = record.fft(channel, window)
+    F = record.fft(channel, window, preprocess, pre_amount)
     if kind == "magnitude":
         return _png(ffx.magnitude_display(F, scale=scale, gamma=gamma, clip_lo=clip_lo, clip_hi=clip_hi))
     if kind == "psd":
@@ -202,7 +237,7 @@ def spectrum_png(
 def band_energy_png(image_id: str, req: MaskRequest):
     """Spatial energy map of the selected frequency band (the overlay payload)."""
     record = _record(image_id)
-    F = record.fft(req.channel, req.window)
+    F = record.fft(req.channel, req.window, req.preprocess, req.pre_amount)
     mask = build_mask(F.shape, req.specs, invert=req.invert, symmetric=True, soft_px=req.soft_px)
     return _png(ffx.to_uint8(ffx.band_energy_map(F, mask)))
 
@@ -213,13 +248,15 @@ def filter_png(image_id: str, req: MaskRequest):
     record = _record(image_id)
     shape = record.pixels.shape[:2]
     mask = build_mask(shape, req.specs, invert=req.invert, symmetric=True, soft_px=req.soft_px)
-    if record.pixels.ndim == 3 and req.channel == "luma":
+    if record.pixels.ndim == 3 and req.channel == "luma" and req.preprocess == "none":
         recon = np.stack(
             [ffx.masked_reconstruction(record.fft(c, req.window), mask) for c in ("r", "g", "b")],
             axis=-1,
         )
     else:
-        recon = ffx.masked_reconstruction(record.fft(req.channel, req.window), mask)
+        recon = ffx.masked_reconstruction(
+            record.fft(req.channel, req.window, req.preprocess, req.pre_amount), mask
+        )
     return _png(ffx.to_uint8(recon))
 
 
@@ -234,21 +271,28 @@ def mask_png(image_id: str, req: MaskRequest):
 def patch_spectrum_png(image_id: str, req: PatchRequest):
     """Localized spectrum of a spatial ROI (pixel -> frequency direction)."""
     record = _record(image_id)
-    img2d = record.channel(req.channel)
+    img2d = record.channel(req.channel, req.preprocess, req.pre_amount)
     return _png(ffx.patch_spectrum(img2d, req.x, req.y, req.w, req.h, window=req.window, out_size=256))
 
 
 @app.get("/api/images/{image_id}/reconstruct.png")
-def reconstruct_png(image_id: str, fraction: float = 1.0, channel: str = "luma", window: str = "none"):
+def reconstruct_png(
+    image_id: str,
+    fraction: float = 1.0,
+    channel: str = "luma",
+    window: str = "none",
+    preprocess: str = "none",
+    pre_amount: float = 1.0,
+):
     """Progressive reconstruction: only radial frequencies below `fraction` of Nyquist."""
     record = _record(image_id)
-    if record.pixels.ndim == 3 and channel == "luma":
+    if record.pixels.ndim == 3 and channel == "luma" and preprocess == "none":
         recon = np.stack(
             [ffx.lowpass_reconstruction(record.fft(c, window), fraction) for c in ("r", "g", "b")],
             axis=-1,
         )
     else:
-        recon = ffx.lowpass_reconstruction(record.fft(channel, window), fraction)
+        recon = ffx.lowpass_reconstruction(record.fft(channel, window, preprocess, pre_amount), fraction)
     return _png(ffx.to_uint8(recon))
 
 
@@ -256,15 +300,19 @@ def reconstruct_png(image_id: str, fraction: float = 1.0, channel: str = "luma",
 # analysis
 
 @app.get("/api/images/{image_id}/metrics")
-def image_metrics(image_id: str, channel: str = "luma") -> dict:
+def image_metrics(image_id: str, channel: str = "luma", preprocess: str = "none", pre_amount: float = 1.0) -> dict:
     record = _record(image_id)
-    return record.analysis_cache(f"metrics:{channel}", lambda: compute_metrics(record.channel(channel)))
+    key = f"metrics:{channel}:{preprocess}:{round(pre_amount, 3)}"
+    return record.analysis_cache(key, lambda: compute_metrics(record.channel(channel, preprocess, pre_amount)))
 
 
 @app.get("/api/images/{image_id}/anomalies")
-def image_anomalies(image_id: str, channel: str = "luma") -> list[dict]:
+def image_anomalies(
+    image_id: str, channel: str = "luma", preprocess: str = "none", pre_amount: float = 1.0
+) -> list[dict]:
     record = _record(image_id)
-    return record.analysis_cache(f"anomalies:{channel}", lambda: detect_all(record.channel(channel)))
+    key = f"anomalies:{channel}:{preprocess}:{round(pre_amount, 3)}"
+    return record.analysis_cache(key, lambda: detect_all(record.channel(channel, preprocess, pre_amount)))
 
 
 # --------------------------------------------------------------------------
@@ -418,10 +466,21 @@ else:  # pragma: no cover - only hit in broken source checkouts
         )
 
 
-def run_server(host: str = "127.0.0.1", port: int = 8321, open_browser: bool = True) -> None:
+def run_server(host: str = "127.0.0.1", port: int = 8321, open_browser: bool = True, dev: bool = False) -> None:
     import uvicorn
 
     if open_browser:
         threading.Timer(1.2, lambda: webbrowser.open(f"http://{host}:{port}")).start()
     print(f"FourierLens {__version__} - http://{host}:{port}  (Ctrl+C to stop)")
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    if dev:
+        # auto-reload needs the app as an import string; watch only our package
+        uvicorn.run(
+            "fourierlens.server.app:app",
+            host=host,
+            port=port,
+            log_level="info",
+            reload=True,
+            reload_dirs=[str(Path(__file__).resolve().parents[1])],
+        )
+    else:
+        uvicorn.run(app, host=host, port=port, log_level="warning")

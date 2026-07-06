@@ -41,6 +41,11 @@ fourierlens = "fourierlens.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/fourierlens"]
+# ship the demo gallery inside the package so pip/uvx users get a working first run
+force-include = { "samples" = "fourierlens/samples" }
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "samples", "frontend/src", "frontend/*.json", "frontend/*.ts", "frontend/*.html", "README.md", "LICENSE"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

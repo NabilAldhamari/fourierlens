@@ -23,6 +23,10 @@ export interface ExploreState {
   meta: ImageMeta | null;
   error: string | null;
 
+  // pre-filtering (applied to the channel before every analysis/view)
+  preprocess: string;
+  preAmount: number;
+
   // spectrum display settings
   channel: Channel;
   window: WindowName;
@@ -72,6 +76,8 @@ export interface ExploreState {
 }
 
 const DEFAULT_SETTINGS = {
+  preprocess: "none",
+  preAmount: 1.0,
   channel: "luma" as Channel,
   window: "hann" as WindowName,
   kind: "magnitude" as SpectrumKind,
@@ -121,7 +127,13 @@ export const useExplore = create<ExploreState>((set, get) => ({
       pixelView: "original",
     }),
 
-  addSelection: (spec) => set({ selections: [...get().selections, spec] }),
+  addSelection: (spec) =>
+    set({
+      selections: [...get().selections, spec],
+      // first selection: flip the left panel to the overlay so the user
+      // immediately SEES what selecting a frequency region does
+      pixelView: get().pixelView === "original" ? "overlay" : get().pixelView,
+    }),
   removeSelection: (index) => set({ selections: get().selections.filter((_, i) => i !== index) }),
   clearSelections: () => set({ selections: [], invert: false }),
 
@@ -145,6 +157,8 @@ export const useExplore = create<ExploreState>((set, get) => ({
       savedAt: new Date().toISOString(),
       image: { filename: s.meta.filename, sha256: s.meta.sha256, path: s.meta.path },
       settings: {
+        preprocess: s.preprocess,
+        preAmount: s.preAmount,
         channel: s.channel,
         window: s.window,
         kind: s.kind,

@@ -1,0 +1,12 @@
+services:
+  fourierlens:
+    build: .
+    image: fourierlens:latest
+    container_name: fourierlens
+    ports:
+      - "8321:8321"
+    # Optional: mount a local dataset folder so batch mode can read it at /data.
+    # Point the batch "folder" field at /data inside the app.
+    volumes:
+      - ./data:/data:ro
+    restart: unless-stopped

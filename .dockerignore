@@ -1,0 +1,15 @@
+.venv/
+node_modules/
+frontend/node_modules/
+frontend/dist/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.git/
+dist/
+dist_check/
+docs/
+tests/
+.firecrawl/
+fourierlens_report.*
+*.fourierlens.json

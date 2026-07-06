@@ -17,7 +17,12 @@ from pathlib import Path
 def _cmd_serve(args: argparse.Namespace) -> int:
     from .server.app import run_server
 
-    run_server(host=args.host, port=args.port, open_browser=not args.no_browser)
+    run_server(
+        host=args.host,
+        port=args.port,
+        open_browser=not args.no_browser,
+        dev=getattr(args, "dev", False),
+    )
     return 0
 
 
@@ -101,6 +106,7 @@ def main(argv: list[str] | None = None) -> int:
     p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--port", type=int, default=8321)
     p_serve.add_argument("--no-browser", action="store_true", help="do not auto-open the browser")
+    p_serve.add_argument("--dev", action="store_true", help="auto-reload the server when Python sources change")
 
     p_an = sub.add_parser("analyze", help="print metrics and anomaly flags for one image")
     p_an.add_argument("image")

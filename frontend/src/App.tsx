@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api } from "./api";
+import { api, type AppConfig } from "./api";
 import BatchPage from "./components/BatchPage";
 import ComparePage from "./components/ComparePage";
 import ExplorePage from "./components/ExplorePage";
@@ -15,17 +15,31 @@ const TABS: { id: Tab; label: string }[] = [
 
 export default function App() {
   const { tab, setTab } = useApp();
-  const [windowDescriptions, setWindowDescriptions] = useState<Record<string, string>>({});
+  const [config, setConfig] = useState<AppConfig | null>(null);
   const [serverOk, setServerOk] = useState<boolean | null>(null);
 
+  // retry briefly: at startup the API may still be booting behind the UI
   useEffect(() => {
-    api
-      .config()
-      .then((cfg) => {
-        setWindowDescriptions(cfg.windows);
-        setServerOk(true);
-      })
-      .catch(() => setServerOk(false));
+    let stopped = false;
+    let tries = 0;
+    const attempt = () => {
+      api
+        .config()
+        .then((cfg) => {
+          if (stopped) return;
+          setConfig(cfg);
+          setServerOk(true);
+        })
+        .catch(() => {
+          if (stopped) return;
+          if (++tries < 10) setTimeout(attempt, 700);
+          else setServerOk(false);
+        });
+    };
+    attempt();
+    return () => {
+      stopped = true;
+    };
   }, []);
 
   return (
@@ -53,7 +67,9 @@ export default function App() {
         </div>
       )}
       <main className={tab === "explore" ? "main-explore" : ""}>
-        {tab === "explore" && <ExplorePage windowDescriptions={windowDescriptions} />}
+        {tab === "explore" && (
+          <ExplorePage windowDescriptions={config?.windows ?? {}} preprocessOps={config?.preprocess ?? {}} />
+        )}
         {tab === "batch" && <BatchPage />}
         {tab === "compare" && <ComparePage />}
         {tab === "help" && <HelpPage />}
