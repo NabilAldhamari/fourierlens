@@ -7,6 +7,8 @@ frontend applies colormaps client-side so cosmetic changes cost no round-trip.
 
 from __future__ import annotations
 
+import os
+import re
 import threading
 import webbrowser
 from io import BytesIO
@@ -15,7 +17,7 @@ from pathlib import Path
 import numpy as np
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from pydantic import BaseModel, Field
@@ -31,6 +33,7 @@ from ..core.windows import describe_windows
 from .jobs import JobManager
 from .store import ImageStore
 
+
 def _find_samples_dir() -> Path:
     """Samples ship inside the package for installed wheels, but live at the repo
     root in a dev checkout. Prefer whichever actually contains images."""
@@ -45,6 +48,20 @@ def _find_samples_dir() -> Path:
 SAMPLES_DIR = _find_samples_dir()
 WEBUI_DIR = Path(__file__).resolve().parent.parent / "webui"
 
+# Upload limits: the explorer works on a downscaled copy anyway, so these only
+# stop a runaway upload from exhausting RAM. Batch/CLI read from disk uncapped.
+MAX_UPLOAD_BYTES = 256 * 1024 * 1024
+MAX_UPLOAD_PIXELS = 256_000_000
+_SAMPLE_NAME = re.compile(r"[A-Za-z0-9_\-]+")
+
+# Only answer requests addressed to the local machine. Without this, a web page
+# the user visits could rebind its DNS name to 127.0.0.1 and drive this API
+# (including the file browser) from the browser. Add names via
+# FOURIERLENS_ALLOWED_HOSTS (comma-separated) when serving behind a proxy.
+ALLOWED_HOSTS = ["localhost", "127.0.0.1", "[::1]", "::1"] + [
+    h.strip() for h in os.environ.get("FOURIERLENS_ALLOWED_HOSTS", "").split(",") if h.strip()
+]
+
 store = ImageStore()
 jobs = JobManager()
 
@@ -56,6 +73,17 @@ async def _value_error_as_422(_request, exc: ValueError):
     """Core modules raise ValueError for bad user input (unknown preprocess op,
     window, mask type...). Surface those as 422 with the message, not a 500."""
     return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+
+
+
+@app.middleware("http")
+async def _reject_foreign_hosts(request, call_next):
+    host = request.headers.get("host", "")
+    name = host.rsplit(":", 1)[0] if not host.endswith("]") else host  # keep [::1] intact
+    if name not in ALLOWED_HOSTS:
+        return Response(f"Host {name!r} is not allowed", status_code=400, media_type="text/plain")
+    return await call_next(request)
 
 
 app.add_middleware(
@@ -157,6 +185,8 @@ def list_samples() -> list[dict]:
 
 @app.post("/api/images/sample")
 def load_sample(req: PathRequest) -> dict:
+    if not _SAMPLE_NAME.fullmatch(req.path):
+        raise HTTPException(404, f"No sample named {req.path!r}")
     candidates = [p for p in SAMPLES_DIR.glob(f"{req.path}.*") if p.suffix.lower() in SUPPORTED_EXTENSIONS]
     if not candidates:
         raise HTTPException(404, f"No sample named {req.path!r}")
@@ -166,9 +196,13 @@ def load_sample(req: PathRequest) -> dict:
 
 @app.post("/api/images")
 async def upload_image(file: UploadFile = File(...)) -> dict:
-    data = await file.read()
+    data = bytearray()
+    while chunk := await file.read(1024 * 1024):
+        data += chunk
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(413, f"File exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB upload limit")
     try:
-        image = load_image_bytes(data, file.filename or "upload")
+        image = load_image_bytes(bytes(data), file.filename or "upload", max_pixels=MAX_UPLOAD_PIXELS)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(422, f"Could not decode image: {exc}") from exc
     image_id, record = store.add(image)
@@ -469,6 +503,8 @@ else:  # pragma: no cover - only hit in broken source checkouts
 def run_server(host: str = "127.0.0.1", port: int = 8321, open_browser: bool = True, dev: bool = False) -> None:
     import uvicorn
 
+    if host not in ("0.0.0.0", "::") and host not in ALLOWED_HOSTS:
+        ALLOWED_HOSTS.append(host)
     if open_browser:
         threading.Timer(1.2, lambda: webbrowser.open(f"http://{host}:{port}")).start()
     print(f"FourierLens {__version__} - http://{host}:{port}  (Ctrl+C to stop)")

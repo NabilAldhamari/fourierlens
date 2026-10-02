@@ -64,18 +64,34 @@ def _collapse_channels(arr: np.ndarray) -> np.ndarray:
     raise ValueError(f"Unsupported image shape: {arr.shape}")
 
 
-def load_image_bytes(data: bytes, filename: str = "image") -> LoadedImage:
-    """Load an image from raw file bytes. Supports 8-bit web formats and 16/32-bit TIFF."""
+def _check_pixels(width: int, height: int, max_pixels: int | None) -> None:
+    if max_pixels is not None and width * height > max_pixels:
+        raise ValueError(
+            f"Image is {width}x{height} ({width * height / 1e6:.0f} MP); "
+            f"the limit is {max_pixels / 1e6:.0f} MP"
+        )
+
+
+def load_image_bytes(data: bytes, filename: str = "image", max_pixels: int | None = None) -> LoadedImage:
+    """Load an image from raw file bytes. Supports 8-bit web formats and 16/32-bit TIFF.
+
+    max_pixels rejects oversized images from the header, before any decode.
+    """
     ext = Path(filename).suffix.lower()
     sha = hashlib.sha256(data).hexdigest()[:16]
 
     if ext in (".tif", ".tiff"):
+        if max_pixels is not None:
+            with tifffile.TiffFile(_stdio.BytesIO(data)) as tf:
+                shape = tf.series[0].shape
+            _check_pixels(shape[1] if len(shape) > 1 else 1, shape[0], max_pixels)
         raw = tifffile.imread(_stdio.BytesIO(data))
         raw = _collapse_channels(np.asarray(raw))
         pixels, bit_depth = _normalize_array(raw)
         fmt = "TIFF"
     else:
         with Image.open(_stdio.BytesIO(data)) as im:
+            _check_pixels(im.width, im.height, max_pixels)
             fmt = im.format or ext.lstrip(".").upper()
             if im.mode in ("I;16", "I;16B", "I;16L", "I"):
                 raw = np.asarray(im, dtype=np.uint16 if "16" in im.mode else np.int32)

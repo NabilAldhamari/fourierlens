@@ -7,9 +7,9 @@ Windows (spawn). Results are plain dicts ready for pandas/JSON.
 from __future__ import annotations
 
 import traceback
+from collections.abc import Callable, Iterable
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import Callable, Iterable
 
 import numpy as np
 
