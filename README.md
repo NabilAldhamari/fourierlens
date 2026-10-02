@@ -137,7 +137,7 @@ Lint with `ruff check src tests`. CI runs ruff, the pytest matrix (Linux, Window
 ### Releasing
 
 1. Bump `__version__` in `src/fourierlens/__init__.py` (and `version` in `frontend/package.json`), and move the changelog entries under the new version.
-2. Merge to `main`, then push a tag: `git tag v0.2.0 && git push origin v0.2.0`.
+2. Merge to `main`, then push a tag: `git tag v1.2.0 && git push origin v1.2.0`.
 3. The Release workflow tests, builds, smoke-tests the wheel, creates the GitHub Release and pushes the Docker image to GHCR. To also publish to PyPI, add a trusted publisher for this repository (workflow `release.yml`, environment `pypi`) and set the repository variable `PUBLISH_TO_PYPI` to `true`.
 
 ## License

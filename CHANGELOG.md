@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
-## [0.2.0] - 2026-10-02
+## [1.2.0] - 2026-10-02
 
 ### Added
 - Optional pre-filters before analysis: grayscale/luma, histogram equalize, sharpen, blur, Sobel edges, Laplacian, median denoise, invert.
@@ -25,7 +25,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versio
 ### Changed
 - The package version is defined once in `src/fourierlens/__init__.py`.
 
-## [0.1.0]
+## [1.1.0] and earlier
 
 ### Added
 - Web app: synced pixel/spectrum explorer, frequency-to-pixel and pixel-to-frequency linking, filtering playground, progressive reconstruction.

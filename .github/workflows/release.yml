@@ -1,6 +1,6 @@
 name: Release
 
-# Push a tag like v0.2.0 to publish. The tag must match src/fourierlens/__init__.py.
+# Push a tag like v1.2.0 to publish. The tag must match src/fourierlens/__init__.py.
 on:
   push:
     tags: ["v*"]
