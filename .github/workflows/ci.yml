@@ -6,11 +6,22 @@ on:
   pull_request:
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check src tests scripts
+
   tests:
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
-        python: ["3.10", "3.12"]
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.10", "3.12", "3.13"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -19,6 +30,17 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: pip install -e ".[dev]"
       - run: pytest -q
+
+  wheel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build
+      - run: python -m build
+      - run: python scripts/smoke_wheel.py dist/*.whl
 
   frontend:
     runs-on: ubuntu-latest
@@ -33,3 +55,9 @@ jobs:
         working-directory: frontend
       # the committed bundle must match the sources; fail if someone forgot to rebuild
       - run: git diff --stat --exit-code src/fourierlens/webui || (echo "::error::frontend build is stale — run 'npm run build' in frontend/ and commit src/fourierlens/webui" && exit 1)
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t fourierlens:ci .

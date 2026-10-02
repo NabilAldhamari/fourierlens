@@ -1,6 +1,6 @@
 # FourierLens
 
-[![CI](https://github.com/fourierlens/fourierlens/actions/workflows/ci.yml/badge.svg)](https://github.com/fourierlens/fourierlens/actions/workflows/ci.yml)
+[![CI](https://github.com/NabilAldhamari/fourierlens/actions/workflows/ci.yml/badge.svg)](https://github.com/NabilAldhamari/fourierlens/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![compute: NumPy | SciPy](https://img.shields.io/badge/compute-NumPy%20%7C%20SciPy-013243.svg)](https://numpy.org/)
@@ -18,9 +18,16 @@ Everything runs **locally**; no image ever leaves your machine.
 With [uv](https://docs.astral.sh/uv/) (recommended, installs nothing globally):
 
 ```bash
-git clone <this-repo>
+git clone https://github.com/NabilAldhamari/fourierlens
 cd fourierlens
 uv run fourierlens
+```
+
+Or install the released package (once published to PyPI):
+
+```bash
+pipx install fourierlens   # or: uvx fourierlens
+fourierlens
 ```
 
 Or with plain Python (3.10+):
@@ -48,11 +55,19 @@ Then open `http://127.0.0.1:8321` in your browser. Stop it with `Ctrl+C`, or run
 
 To analyze your own dataset in batch mode, drop it into a `./data` folder next to `docker-compose.yml` (it is mounted read-only at `/data` inside the container) and point the batch folder field at `/data`.
 
+Prebuilt image from GitHub Container Registry:
+
+```bash
+docker run --rm -p 127.0.0.1:8321:8321 ghcr.io/nabilaldhamari/fourierlens:latest
+```
+
+Always publish the port on `127.0.0.1` as shown: the app can browse and read files on the machine it runs on, so it must not be reachable from your network.
+
 Plain Docker, without Compose:
 
 ```bash
 docker build -t fourierlens .
-docker run --rm -p 8321:8321 fourierlens
+docker run --rm -p 127.0.0.1:8321:8321 fourierlens
 ```
 
 ## What it does
@@ -117,7 +132,13 @@ cd frontend && npm install && npm run dev
 npm run build
 ```
 
-CI runs the pytest matrix (Linux + Windows, Python 3.10 & 3.12) and verifies the committed `webui` bundle is up to date with the frontend sources.
+Lint with `ruff check src tests`. CI runs ruff, the pytest matrix (Linux, Windows, macOS; Python 3.10, 3.12, 3.13), a wheel install smoke test, a Docker build, and verifies the committed `webui` bundle is up to date with the frontend sources.
+
+### Releasing
+
+1. Bump `__version__` in `src/fourierlens/__init__.py` (and `version` in `frontend/package.json`), and move the changelog entries under the new version.
+2. Merge to `main`, then push a tag: `git tag v0.2.0 && git push origin v0.2.0`.
+3. The Release workflow tests, builds, smoke-tests the wheel, creates the GitHub Release and pushes the Docker image to GHCR. To also publish to PyPI, add a trusted publisher for this repository (workflow `release.yml`, environment `pypi`) and set the repository variable `PUBLISH_TO_PYPI` to `true`.
 
 ## License
 

@@ -4,8 +4,8 @@ intended spectral effect."""
 import numpy as np
 import pytest
 
-from fourierlens.core.preprocess import PREPROCESS_OPS, apply_preprocess, describe_ops
 from fourierlens.core.metrics import compute_metrics
+from fourierlens.core.preprocess import PREPROCESS_OPS, apply_preprocess, describe_ops
 
 
 def _pink(n=128, alpha=2.0, seed=0):

@@ -4,9 +4,9 @@ build-backend = "hatchling.build"
 
 [project]
 name = "fourierlens"
-version = "0.1.0"
 description = "Interactive Fourier analysis for computer vision research - explore, annotate, and batch-audit images in the frequency domain."
 readme = "README.md"
+dynamic = ["version"]
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "FourierLens contributors" }]
@@ -31,13 +31,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "httpx>=0.27"]
+dev = ["pytest>=8.0", "httpx>=0.27", "ruff>=0.6", "build>=1.2"]
 
 [project.urls]
-Homepage = "https://github.com/fourierlens/fourierlens"
+Homepage = "https://github.com/NabilAldhamari/fourierlens"
+Source = "https://github.com/NabilAldhamari/fourierlens"
+Changelog = "https://github.com/NabilAldhamari/fourierlens/blob/main/CHANGELOG.md"
+Issues = "https://github.com/NabilAldhamari/fourierlens/issues"
 
 [project.scripts]
 fourierlens = "fourierlens.cli:main"
+
+[tool.hatch.version]
+path = "src/fourierlens/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/fourierlens"]
@@ -45,7 +51,19 @@ packages = ["src/fourierlens"]
 force-include = { "samples" = "fourierlens/samples" }
 
 [tool.hatch.build.targets.sdist]
-include = ["src", "tests", "samples", "frontend/src", "frontend/*.json", "frontend/*.ts", "frontend/*.html", "README.md", "LICENSE"]
+include = ["src", "tests", "samples", "frontend/src", "frontend/*.json", "frontend/*.ts", "frontend/*.html", "README.md", "LICENSE", "CHANGELOG.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+    # Starlette suggests httpx2; keep httpx so older Starlette releases still work
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501", "B008"]

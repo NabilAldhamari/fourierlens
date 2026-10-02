@@ -131,15 +131,22 @@ def _json_default(obj):
     raise TypeError(f"not serializable: {type(obj)}")
 
 
+MAX_JOBS = 8  # finished jobs hold every record in RAM; keep only the latest few
+
+
 class JobManager:
-    def __init__(self):
+    def __init__(self, max_jobs: int = MAX_JOBS):
         self._jobs: dict[str, BatchJob] = {}
+        self._max = max_jobs
         self._lock = threading.Lock()
 
     def start(self, paths: list[str | Path], workers: int = 0) -> BatchJob:
         job = BatchJob([str(p) for p in paths], workers=workers)
         with self._lock:
             self._jobs[job.id] = job
+            finished = [j for j in self._jobs if self._jobs[j].status in ("done", "failed")]
+            for old in finished[: max(0, len(self._jobs) - self._max)]:
+                del self._jobs[old]
         threading.Thread(target=job.run, daemon=True, name=f"batch-{job.id}").start()
         return job
 
