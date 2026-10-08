@@ -7,7 +7,6 @@ import pytest
 from PIL import Image
 
 from fourierlens.core import fft as ffx
-from fourierlens.core import masks as msk
 from fourierlens.core.io import load_image_bytes, to_channel
 from fourierlens.core.metrics import compute_metrics, radial_profile, spectral_slope
 from fourierlens.core.windows import apply_window, get_window_2d
@@ -46,79 +45,6 @@ def test_parseval_energy_conservation():
     spatial_energy = float(np.sum(img.astype(np.float64) ** 2))
     freq_energy = float(np.sum(np.abs(F.astype(np.complex128)) ** 2) / F.size)
     assert spatial_energy == pytest.approx(freq_energy, rel=1e-4)
-
-
-def test_allpass_mask_reconstructs_input():
-    img = np.random.default_rng(1).random((64, 80)).astype(np.float32)
-    F = ffx.compute_fft(img)
-    mask = msk.build_mask(F.shape, [{"type": "annulus", "r_inner": 0.0, "r_outer": 10.0}])
-    rec = ffx.masked_reconstruction(F, mask)
-    assert np.allclose(rec, img, atol=1e-4)
-
-
-def test_band_energy_localizes_pattern():
-    """A grating confined to the left half should produce band energy on the left."""
-    n = 128
-    img = np.full((n, n), 0.5, dtype=np.float32)
-    img[:, : n // 2] = make_sinusoid(n, cycles_x=16)[:, : n // 2]
-    F = ffx.compute_fft(img)
-    mask = msk.build_mask((n, n), [{"type": "point", "x": (n // 2 + 16 + 0.5) / n, "y": 0.5 + 0.5 / n, "r": 0.08}])
-    energy = ffx.band_energy_map(F, mask)
-    left, right = energy[:, : n // 2].mean(), energy[:, n // 2 :].mean()
-    assert left > 3 * right
-
-
-def test_lowpass_reconstruction_blurs():
-    img = np.random.default_rng(2).random((64, 64)).astype(np.float32)
-    F = ffx.compute_fft(img)
-    rec = ffx.lowpass_reconstruction(F, 0.1)
-    assert rec.std() < img.std()
-    full = ffx.lowpass_reconstruction(F, 2.0)
-    assert np.allclose(full, img, atol=1e-4)
-
-
-def test_spectrum_point_info():
-    info = ffx.spectrum_point_info((256, 256), fx=0.25, fy=0.0)
-    assert info["cycles_per_px"] == pytest.approx(0.125)
-    assert info["wavelength_px"] == pytest.approx(8.0)
-    assert info["orientation_deg"] == 0.0
-
-
-# ---------- masks ----------
-
-def test_masks_are_conjugate_symmetric():
-    for spec in [
-        {"type": "rect", "x": 0.6, "y": 0.2, "w": 0.15, "h": 0.1},
-        {"type": "point", "x": 0.7, "y": 0.3, "r": 0.05},
-        {"type": "wedge", "angle_deg": 30, "width_deg": 20},
-        {"type": "brush", "points": [[0.6, 0.3], [0.7, 0.35]], "r": 0.04},
-    ]:
-        mask = msk.build_mask((64, 64), [spec])
-        flipped = np.roll(np.flip(mask, axis=(0, 1)), shift=(1, 1), axis=(0, 1))
-        assert np.array_equal(mask, flipped), f"not symmetric for {spec['type']}"
-
-
-def test_masked_ifft_is_real():
-    img = np.random.default_rng(3).random((64, 64)).astype(np.float32)
-    F = ffx.compute_fft(img)
-    mask = msk.build_mask((64, 64), [{"type": "rect", "x": 0.55, "y": 0.55, "w": 0.2, "h": 0.2}])
-    rec = np.fft.ifft2(F * mask)
-    assert np.max(np.abs(rec.imag)) < 1e-4
-
-
-def test_annulus_mask_selects_band():
-    mask = msk.build_mask((128, 128), [{"type": "annulus", "r_inner": 0.2, "r_outer": 0.5}])
-    shifted = np.fft.fftshift(mask)
-    r = ffx.radius_grid((128, 128))
-    assert shifted[r < 0.15].max() == 0.0
-    assert shifted[(r > 0.25) & (r < 0.45)].min() == 1.0
-
-
-def test_invert_mask():
-    spec = [{"type": "annulus", "r_inner": 0.0, "r_outer": 0.3}]
-    lp = np.fft.fftshift(msk.build_mask((64, 64), spec))
-    hp = np.fft.fftshift(msk.build_mask((64, 64), spec, invert=True))
-    assert np.allclose(lp + hp, 1.0)
 
 
 # ---------- windows ----------

@@ -1,7 +1,6 @@
-"""Host allowlist, upload limits, sample-name sanitizing, job eviction."""
+"""Host allowlist, upload limits, sample-name sanitizing."""
 
 import io
-import time
 
 import numpy as np
 import pytest
@@ -10,7 +9,6 @@ from PIL import Image
 
 from fourierlens.core.io import load_image_bytes
 from fourierlens.server import app as appmod
-from fourierlens.server.jobs import JobManager
 
 client = TestClient(appmod.app)
 
@@ -53,17 +51,4 @@ def test_max_pixels_tiff():
 
 @pytest.mark.parametrize("name", ["../x", "*", "a/b", "..\\x", ""])
 def test_sample_name_sanitized(name):
-    assert client.post("/api/images/sample", json={"path": name}).status_code == 404
-
-
-def test_job_eviction():
-    mgr = JobManager(max_jobs=2)
-    first = mgr.start([])
-    for _ in range(4):
-        mgr.start([])
-    deadline = time.time() + 5
-    while any(j.status in ("pending", "running") for j in mgr._jobs.values()) and time.time() < deadline:
-        time.sleep(0.02)
-    mgr.start([])  # eviction runs on start, once earlier jobs have finished
-    assert len(mgr._jobs) <= 3
-    assert mgr.get(first.id) is None
+    assert client.post("/api/images/sample", json={"name": name}).status_code == 404

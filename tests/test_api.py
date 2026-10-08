@@ -12,9 +12,11 @@ from fourierlens.server.app import app
 client = TestClient(app)
 
 
-def _upload(arr01: np.ndarray, name="test.png") -> str:
+def _upload(name="test.png", fmt="PNG") -> str:
+    rng = np.random.default_rng(0)
+    arr = np.clip(128 + rng.normal(0, 20, (96, 128, 3)), 0, 255).astype(np.uint8)
     buf = io.BytesIO()
-    Image.fromarray((arr01 * 255).astype(np.uint8)).save(buf, "PNG")
+    Image.fromarray(arr).save(buf, fmt)
     buf.seek(0)
     r = client.post("/api/images", files={"file": (name, buf, "image/png")})
     assert r.status_code == 200, r.text
@@ -22,92 +24,67 @@ def _upload(arr01: np.ndarray, name="test.png") -> str:
 
 
 @pytest.fixture(scope="module")
-def grating_id() -> str:
-    n = 128
-    y, x = np.mgrid[0:n, 0:n].astype(np.float64)
-    return _upload(0.5 + 0.4 * np.sin(2 * np.pi * 8 * x / n))
+def image_id() -> str:
+    return _upload()
 
 
 def test_health_and_config():
     assert client.get("/api/health").json()["ok"] is True
     cfg = client.get("/api/config").json()
-    assert "hann" in cfg["windows"]
-    assert "spectral_slope" in cfg["metrics"]
+    assert [t["id"] for t in cfg["tabs"]] == ["color", "noise", "compression", "blending", "frequency"]
+    ela = next(v for v in cfg["views"] if v["id"] == "ela")
+    assert ela["param"]["default"] == 90 and ela["look_for"]
 
 
-def test_upload_meta_and_pixels(grating_id):
-    meta = client.get(f"/api/images/{grating_id}").json()
-    assert meta["width"] == 128 and meta["bit_depth"] == 8
-    r = client.get(f"/api/images/{grating_id}/pixels.png")
-    assert r.status_code == 200 and r.headers["content-type"] == "image/png"
+def test_meta(image_id):
+    meta = client.get(f"/api/images/{image_id}").json()
+    assert meta["width"] == 128 and meta["analysis_width"] == 128
 
 
-def test_spectrum_views(grating_id):
-    for kind in ("magnitude", "phase", "psd"):
-        r = client.get(f"/api/images/{grating_id}/spectrum.png", params={"kind": kind, "window": "hann"})
-        assert r.status_code == 200, kind
-    assert client.get(f"/api/images/{grating_id}/spectrum.png", params={"kind": "nope"}).status_code == 422
+def test_original_and_every_view(image_id):
+    r = client.get(f"/api/images/{image_id}/original.png")
+    assert r.status_code == 200 and Image.open(io.BytesIO(r.content)).size == (128, 96)
+    for v in client.get("/api/config").json()["views"]:
+        r = client.get(f"/api/images/{image_id}/views/{v['id']}.png")
+        assert r.status_code == 200, v["id"]
+        assert Image.open(io.BytesIO(r.content)).size == (128, 96)
 
 
-def test_band_energy_and_filter(grating_id):
-    body = {"specs": [{"type": "annulus", "r_inner": 0.05, "r_outer": 0.3}], "channel": "luma"}
-    r = client.post(f"/api/images/{grating_id}/band-energy.png", json=body)
-    assert r.status_code == 200
-    r = client.post(f"/api/images/{grating_id}/filter.png", json={**body, "invert": True})
-    assert r.status_code == 200
-    r = client.post(f"/api/images/{grating_id}/mask.png", json=body)
-    assert r.status_code == 200
+def test_view_param_validation(image_id):
+    assert client.get(f"/api/images/{image_id}/views/ela.png?quality=70").status_code == 200
+    assert client.get(f"/api/images/{image_id}/views/ela.png?quality=20").status_code == 422
+    assert client.get(f"/api/images/{image_id}/views/nope.png").status_code == 404
 
 
-def test_patch_spectrum_and_reconstruct(grating_id):
-    r = client.post(
-        f"/api/images/{grating_id}/patch-spectrum.png",
-        json={"x": 10, "y": 10, "w": 48, "h": 48},
-    )
-    assert r.status_code == 200
-    r = client.get(f"/api/images/{grating_id}/reconstruct.png", params={"fraction": 0.2})
-    assert r.status_code == 200
-
-
-def test_metrics_and_anomalies(grating_id):
-    m = client.get(f"/api/images/{grating_id}/metrics").json()
-    assert "spectral_slope" in m and len(m["radial_profile"]["freqs"]) == 64
-    flags = client.get(f"/api/images/{grating_id}/anomalies").json()
-    assert isinstance(flags, list)
+def test_findings(image_id):
+    f = client.get(f"/api/images/{image_id}/findings").json()
+    assert isinstance(f["flags"], list)
+    assert len(f["spectrum"]["freqs"]) == len(f["spectrum"]["log_power"])
+    for flag in f["flags"]:
+        assert {"type", "severity", "title", "explanation", "view"} <= flag.keys()
 
 
 def test_unknown_image_404():
-    assert client.get("/api/images/doesnotexist").status_code == 404
+    assert client.get("/api/images/doesnotexist/original.png").status_code == 404
 
 
-def test_samples_listing():
-    r = client.get("/api/samples")
-    assert r.status_code == 200
-    names = [s["name"] for s in r.json()]
-    if names:  # samples exist in a repo checkout
-        assert "grating" in names
-        rr = client.post("/api/images/sample", json={"path": "grating"})
-        assert rr.status_code == 200
+def test_bad_upload_422():
+    r = client.post("/api/images", files={"file": ("x.png", b"not an image", "image/png")})
+    assert r.status_code == 422
 
 
-def test_batch_job_roundtrip(tmp_path):
-    rng = np.random.default_rng(0)
-    for i in range(3):
-        Image.fromarray((rng.random((48, 48)) * 255).astype(np.uint8)).save(tmp_path / f"i{i}.png")
-    r = client.post("/api/batch", json={"directory": str(tmp_path), "workers": 1})
-    assert r.status_code == 200, r.text
-    job_id = r.json()["job_id"]
+def test_samples():
+    names = [s["name"] for s in client.get("/api/samples").json()]
+    if not names:  # samples exist in a repo checkout
+        pytest.skip("no samples")
+    assert client.get(f"/api/samples/{names[0]}/thumb.png").status_code == 200
+    r = client.post("/api/images/sample", json={"name": names[0]})
+    assert r.status_code == 200 and r.json()["id"]
 
-    import time
 
-    for _ in range(100):
-        s = client.get(f"/api/jobs/{job_id}").json()
-        if s["status"] in ("done", "failed"):
-            break
-        time.sleep(0.1)
-    assert s["status"] == "done", s
-    rows = client.get(f"/api/jobs/{job_id}/rows").json()
-    assert len(rows) == 3 and "spectral_slope" in rows[0]
-    assert client.get(f"/api/jobs/{job_id}/mean-spectrum.png").status_code == 200
-    for fmt in ("csv", "json", "parquet"):
-        assert client.get(f"/api/jobs/{job_id}/export", params={"format": fmt}).status_code == 200
+def test_blended_sample_is_flagged():
+    if "blended" not in [s["name"] for s in client.get("/api/samples").json()]:
+        pytest.skip("no samples")
+    image_id = client.post("/api/images/sample", json={"name": "blended"}).json()["id"]
+    flags = client.get(f"/api/images/{image_id}/findings").json()["flags"]
+    assert flags[0]["type"] == "missing_noise" and flags[0]["view"] == "noise_level"

@@ -153,14 +153,11 @@ def detect_all(img2d: np.ndarray) -> list[dict]:
                 {
                     "type": "periodic_noise",
                     "severity": _sigmoid((top - 2.2) / 0.5),
-                    "title": f"Periodic pattern detected ({len(other_peaks)} spectral peak{'s' if len(other_peaks) != 1 else ''})",
+                    "title": f"Repeating pattern ({len(other_peaks)} spectral peak{'s' if len(other_peaks) != 1 else ''})",
                     "explanation": (
-                        "Isolated bright peaks in the spectrum mean a repeating sinusoidal pattern in the "
-                        "image at one exact frequency and orientation. Common causes: electrical interference "
-                        "in sensors, moire between a scene pattern and the sensor grid, halftone printing "
-                        "screens, or fabric/texture periodicity. Click a marker to highlight the peak and "
-                        "toggle to pixel view to see where that pattern lives in the image; a notch filter "
-                        "at these peaks removes the pattern."
+                        "Bright isolated points in the spectrum mean a pattern that repeats at one exact "
+                        "spacing and angle. Upsampling layers in image generators leave such grids. So do "
+                        "moire, printing screens, sensor interference and regular textures like fabric."
                     ),
                     "locations": [{"x": p["x"], "y": p["y"]} for p in other_peaks],
                     "peaks": other_peaks,
@@ -171,13 +168,11 @@ def detect_all(img2d: np.ndarray) -> list[dict]:
                 {
                     "type": "axis_aligned_peaks",
                     "severity": _sigmoid((max(p["strength_decades"] for p in axis_peaks) - 2.5) / 0.6),
-                    "title": f"Axis-aligned periodic energy ({len(axis_peaks)} peak{'s' if len(axis_peaks) != 1 else ''})",
+                    "title": f"Row or column pattern ({len(axis_peaks)} peak{'s' if len(axis_peaks) != 1 else ''})",
                     "explanation": (
-                        "Peaks lying exactly on the horizontal/vertical frequency axes indicate a pattern "
-                        "repeating along image rows or columns: scanline noise, sensor banding, or artifacts "
-                        "from resizing/resampling (interpolation leaves periodic correlations aligned with "
-                        "the pixel grid). If the image was upscaled, peaks often sit at simple fractions of "
-                        "the sampling rate."
+                        "Peaks on the horizontal or vertical axis of the spectrum mean something repeats "
+                        "along rows or columns. Resizing and upsampling leave this, often at simple "
+                        "fractions such as 1/2 or 1/4 cycles per pixel. Sensor banding does too."
                     ),
                     "locations": [{"x": p["x"], "y": p["y"]} for p in axis_peaks],
                     "peaks": axis_peaks,
@@ -192,10 +187,8 @@ def detect_all(img2d: np.ndarray) -> list[dict]:
                 "severity": jpeg["severity"],
                 "title": "JPEG 8×8 block-compression fingerprint",
                 "explanation": (
-                    "Regular energy at multiples of ⅛ of the sampling rate along both axes is the signature "
-                    "of JPEG's 8×8 block DCT. The image has been JPEG-compressed at some point (even if now "
-                    "saved as PNG). Strong grids mean aggressive compression; this matters when training "
-                    "models, because networks can learn compression artifacts instead of content."
+                    "Regular energy at multiples of 1/8 cycles per pixel is the signature of JPEG's 8×8 "
+                    "blocks. The image was JPEG-compressed at some point, even if it is now another format."
                 ),
                 "grid_strength_decades": jpeg["grid_strength_decades"],
                 "locations": [],
@@ -210,11 +203,9 @@ def detect_all(img2d: np.ndarray) -> list[dict]:
                     "severity": _sigmoid((1.0 - alpha) * 3.0),
                     "title": f"Unnaturally flat spectrum (α = {alpha:.2f})",
                     "explanation": (
-                        "Natural photographs follow a 1/f^α power law with α ≈ 2: power falls off smoothly "
-                        "toward high frequencies. This image's spectrum is much flatter, meaning excess "
-                        "high-frequency energy. Common causes: heavy sharpening, added noise, or synthetic "
-                        "generation - GAN/diffusion models often fail to reproduce the natural spectral "
-                        "decay and leave elevated high-frequency power, a standard forensic cue."
+                        "In natural photos, power falls smoothly towards fine detail (α ≈ 2). Here it "
+                        "barely falls, so there is excess fine-grain energy. Generators often leave this, "
+                        "and so do heavy sharpening and added noise."
                     ),
                     "alpha": round(alpha, 3),
                     "locations": [],
@@ -227,10 +218,8 @@ def detect_all(img2d: np.ndarray) -> list[dict]:
                     "severity": _sigmoid((alpha - 3.8) * 2.0),
                     "title": f"Very steep spectral falloff (α = {alpha:.2f})",
                     "explanation": (
-                        "Power drops toward high frequencies much faster than in typical natural images "
-                        "(α ≈ 2). The image has little fine detail: strong blur, defocus, heavy denoising, "
-                        "or upscaling from a lower resolution. In a dataset, such images carry less usable "
-                        "texture information than their pixel count suggests."
+                        "Fine detail fades much faster than in natural photos (α ≈ 2). The image was "
+                        "probably upscaled from a lower resolution, or blurred or heavily denoised."
                     ),
                     "alpha": round(alpha, 3),
                     "locations": [],
@@ -244,9 +233,8 @@ def detect_all(img2d: np.ndarray) -> list[dict]:
                 "severity": _sigmoid((hf_ratio - 0.45) * 12.0),
                 "title": f"High-frequency energy ratio {hf_ratio:.0%}",
                 "explanation": (
-                    "More than a third of the (non-DC) spectral energy sits above half the Nyquist "
-                    "frequency. Typical photographs keep this well under 10%. Expect strong noise, "
-                    "dithering, or synthetic high-frequency texture."
+                    "More than a third of the image's energy is in the finest detail. Typical photos keep "
+                    "this under 10%. Strong noise, dithering or synthetic texture cause it."
                 ),
                 "hf_ratio": round(hf_ratio, 4),
                 "locations": [],

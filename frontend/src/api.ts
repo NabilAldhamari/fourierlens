@@ -1,178 +1,115 @@
-import type { AnomalyFlag, BatchRow, ImageMeta, JobSummary, MaskSpec, Metrics } from "./types";
+// Typed client for the local FourierLens API.
 
-const BASE = "/api";
+export type Space = "image" | "spectrum";
 
-async function json<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(BASE + url, init);
+export interface ViewParam {
+  name: string;
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+  default: number;
+}
+
+export interface ViewInfo {
+  id: string;
+  tab: string;
+  label: string;
+  look_for: string;
+  method: string;
+  reference: string;
+  space: Space;
+  param: ViewParam | null;
+}
+
+export interface Config {
+  tabs: { id: string; label: string }[];
+  views: ViewInfo[];
+  version: string;
+  extensions: string[];
+}
+
+export interface ImageMeta {
+  filename: string;
+  format: string;
+  width: number;
+  height: number;
+  analysis_width: number;
+  analysis_height: number;
+  downscaled_for_analysis: boolean;
+  bit_depth: number;
+  file_size_bytes: number;
+  sha256: string;
+  jpeg_quality?: number | null;
+  has_exif?: boolean;
+  camera_make?: string;
+  camera_model?: string;
+  software?: string;
+  date_time?: string;
+  generator_metadata?: string[];
+}
+
+export interface LoadedImage {
+  id: string;
+  meta: ImageMeta;
+}
+
+export interface Region {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface Flag {
+  type: string;
+  severity: number;
+  title: string;
+  explanation: string;
+  view: string | null;
+  region?: Region;
+}
+
+export interface Findings {
+  flags: Flag[];
+  spectrum: { freqs: number[]; log_power: number[]; fit: number[] | null; alpha: number | null; r2: number };
+}
+
+export interface Sample {
+  name: string;
+  filename: string;
+}
+
+async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
     let detail = res.statusText;
     try {
       detail = (await res.json()).detail ?? detail;
     } catch {
-      /* not json */
+      /* not JSON */
     }
     throw new Error(detail);
   }
-  return res.json();
-}
-
-async function post<T>(url: string, body: unknown): Promise<T> {
-  return json<T>(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-}
-
-async function bitmapFrom(res: Response): Promise<ImageBitmap> {
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  return createImageBitmap(await res.blob());
-}
-
-export interface AppConfig {
-  windows: Record<string, string>;
-  metrics: Record<string, { label: string; group: string }>;
-  preprocess: Record<string, { label: string; uses_amount: boolean; description: string }>;
-  channels: string[];
-  scales: string[];
-  extensions: string[];
-}
-
-/** Pre-filter parameters attached to every analysis request. */
-export interface PreQuery {
-  preprocess: string;
-  pre_amount: number;
+  return res.json() as Promise<T>;
 }
 
 export const api = {
-  config: () => json<AppConfig>("/config"),
-  samples: () => json<{ name: string; filename: string }[]>("/samples"),
-  loadSample: (name: string) => post<{ id: string; meta: ImageMeta }>("/images/sample", { path: name }),
-  loadFromPath: (path: string) => post<{ id: string; meta: ImageMeta }>("/images/from-path", { path }),
-
-  async upload(file: File): Promise<{ id: string; meta: ImageMeta }> {
-    const form = new FormData();
-    form.append("file", file);
-    const res = await fetch(`${BASE}/images`, { method: "POST", body: form });
-    if (!res.ok) throw new Error((await res.json()).detail ?? res.statusText);
-    return res.json();
+  config: () => fetch("/api/config").then((r) => json<Config>(r)),
+  samples: () => fetch("/api/samples").then((r) => json<Sample[]>(r)),
+  sampleThumb: (name: string) => `/api/samples/${encodeURIComponent(name)}/thumb.png`,
+  loadSample: (name: string) =>
+    fetch("/api/images/sample", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    }).then((r) => json<LoadedImage>(r)),
+  upload: (file: File) => {
+    const body = new FormData();
+    body.append("file", file);
+    return fetch("/api/images", { method: "POST", body }).then((r) => json<LoadedImage>(r));
   },
-
-  pixels: (id: string, channel = "rgb", pre?: PreQuery, signal?: AbortSignal) =>
-    fetch(
-      `${BASE}/images/${id}/pixels.png?channel=${channel}` +
-        (pre ? `&preprocess=${pre.preprocess}&pre_amount=${pre.pre_amount}` : ""),
-      { signal },
-    ).then(bitmapFrom),
-
-  spectrum: (
-    id: string,
-    q: {
-      kind: string;
-      channel: string;
-      window: string;
-      scale: string;
-      gamma: number;
-      clip_lo: number;
-      clip_hi: number;
-    } & PreQuery,
-    signal?: AbortSignal,
-  ) => {
-    const params = new URLSearchParams(Object.entries(q).map(([k, v]) => [k, String(v)]));
-    return fetch(`${BASE}/images/${id}/spectrum.png?${params}`, { signal }).then(bitmapFrom);
-  },
-
-  bandEnergy: (
-    id: string,
-    body: { specs: MaskSpec[]; invert?: boolean; soft_px?: number; channel: string; window: string } & PreQuery,
-    signal?: AbortSignal,
-  ) =>
-    fetch(`${BASE}/images/${id}/band-energy.png`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal,
-    }).then(bitmapFrom),
-
-  filtered: (
-    id: string,
-    body: { specs: MaskSpec[]; invert?: boolean; soft_px?: number; channel: string; window: string } & PreQuery,
-    signal?: AbortSignal,
-  ) =>
-    fetch(`${BASE}/images/${id}/filter.png`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal,
-    }).then(bitmapFrom),
-
-  patchSpectrum: (
-    id: string,
-    body: { x: number; y: number; w: number; h: number; channel: string } & PreQuery,
-    signal?: AbortSignal,
-  ) =>
-    fetch(`${BASE}/images/${id}/patch-spectrum.png`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal,
-    }).then(bitmapFrom),
-
-  reconstruct: (id: string, fraction: number, channel: string, window: string, pre: PreQuery, signal?: AbortSignal) =>
-    fetch(
-      `${BASE}/images/${id}/reconstruct.png?fraction=${fraction}&channel=${channel}&window=${window}` +
-        `&preprocess=${pre.preprocess}&pre_amount=${pre.pre_amount}`,
-      { signal },
-    ).then(bitmapFrom),
-
-  compareDiff: (idA: string, idB: string, channel: string) =>
-    fetch(`${BASE}/compare/diff.png`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id_a: idA, id_b: idB, channel }),
-    }).then(bitmapFrom),
-
-  metrics: (id: string, channel: string, pre: PreQuery) =>
-    json<Metrics>(`/images/${id}/metrics?channel=${channel}&preprocess=${pre.preprocess}&pre_amount=${pre.pre_amount}`),
-  anomalies: (id: string, channel: string, pre: PreQuery) =>
-    json<AnomalyFlag[]>(
-      `/images/${id}/anomalies?channel=${channel}&preprocess=${pre.preprocess}&pre_amount=${pre.pre_amount}`,
-    ),
-
-  fsList: (path: string) =>
-    json<{ path: string; parent: string | null; dirs: string[]; image_count: number }>(
-      `/fs/list?path=${encodeURIComponent(path)}`,
-    ),
-  startBatch: (directory: string, recursive: boolean) =>
-    post<{ job_id: string; total: number }>("/batch", { directory, recursive }),
-  jobStatus: (jobId: string) => json<JobSummary>(`/jobs/${jobId}`),
-  jobRows: (jobId: string) => json<BatchRow[]>(`/jobs/${jobId}/rows`),
-  jobRecord: (jobId: string, path: string) =>
-    json<Record<string, unknown>>(`/jobs/${jobId}/record?path=${encodeURIComponent(path)}`),
-  jobExportUrl: (jobId: string, format: string) => `${BASE}/jobs/${jobId}/export?format=${format}`,
-  jobMeanSpectrum: (jobId: string) => fetch(`${BASE}/jobs/${jobId}/mean-spectrum.png`).then(bitmapFrom),
+  findings: (id: string) => fetch(`/api/images/${id}/findings`).then((r) => json<Findings>(r)),
+  originalUrl: (id: string) => `/api/images/${id}/original.png`,
+  viewUrl: (id: string, view: ViewInfo, value?: number) =>
+    `/api/images/${id}/views/${view.id}.png` + (view.param && value !== undefined ? `?${view.param.name}=${value}` : ""),
 };
-
-/** True for fetches cancelled by an AbortController (never worth surfacing). */
-export function isAbort(e: unknown): boolean {
-  return e instanceof DOMException && e.name === "AbortError";
-}
-
-/** Debounce helper for slider-driven server requests. */
-export function debounce<A extends unknown[]>(fn: (...args: A) => void, ms: number): (...args: A) => void {
-  let t: ReturnType<typeof setTimeout> | undefined;
-  return (...args: A) => {
-    clearTimeout(t);
-    t = setTimeout(() => fn(...args), ms);
-  };
-}
-
-/** Serial request gate: drops stale in-flight responses (last call wins). */
-export function latestOnly<A extends unknown[], R>(fn: (...args: A) => Promise<R>) {
-  let seq = 0;
-  return async (...args: A): Promise<R | null> => {
-    const mine = ++seq;
-    const result = await fn(...args);
-    return mine === seq ? result : null;
-  };
-}

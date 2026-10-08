@@ -7,11 +7,11 @@
 [![UI: React + TS](https://img.shields.io/badge/UI-React%20%2B%20TypeScript-149eca.svg)](https://react.dev/)
 [![privacy: 100% local](https://img.shields.io/badge/privacy-100%25%20local-4ade80.svg)](#privacy)
 
-**Interactive Fourier analysis for computer vision research.** Explore any image in the frequency domain, see exactly *where* each frequency lives in pixel space, annotate and share findings, flag spectral anomalies automatically, and batch-audit entire datasets with exportable metrics.
+**Pixel-level forensics for spotting deepfakes and edited photos.** Open an image and inspect it the way forensic analysts do: color channels, noise, compression traces, blending seams and frequency spectra, each shown next to the original with a shared crosshair. Mark what you find and download annotated images for your research.
 
 Everything runs **locally**; no image ever leaves your machine.
 
-![FourierLens explorer: band-energy overlay, live spectrum, and automatic anomaly flagging](docs/screenshot.png)
+![FourierLens: a JPEG ghost view next to the original, with notes marking a blended patch](docs/screenshot.png)
 
 ## Quickstart
 
@@ -53,15 +53,13 @@ docker compose up
 
 Then open `http://127.0.0.1:8321` in your browser. Stop it with `Ctrl+C`, or run detached with `docker compose up -d` and stop with `docker compose down`.
 
-To analyze your own dataset in batch mode, drop it into a `./data` folder next to `docker-compose.yml` (it is mounted read-only at `/data` inside the container) and point the batch folder field at `/data`.
-
 Prebuilt image from GitHub Container Registry:
 
 ```bash
 docker run --rm -p 127.0.0.1:8321:8321 ghcr.io/nabilaldhamari/fourierlens:latest
 ```
 
-Always publish the port on `127.0.0.1` as shown: the app can browse and read files on the machine it runs on, so it must not be reachable from your network.
+Always publish the port on `127.0.0.1` as shown: the app has no login, so it must not be reachable from your network.
 
 Plain Docker, without Compose:
 
@@ -72,39 +70,47 @@ docker run --rm -p 127.0.0.1:8321:8321 fourierlens
 
 ## What it does
 
-### Single-image explorer
-- **Synced dual panels:** the pixel view and the frequency spectrum zoom and pan together, so the spot you inspect in the image is the spot you inspect in the spectrum.
-- Magnitude / phase / power spectra with DC centered, log/linear/gamma scaling, percentile clipping, colormaps, and window functions (Hann, Hamming, Blackman, Tukey) with plain-language explanations.
-- **Optional pre-filtering** before analysis (grayscale/luma, histogram equalize, sharpen, blur, Sobel edges, Laplacian, median denoise, invert), because edge extraction or equalization often makes subtle spectral structure far easier to see.
-- **Frequency to pixel:** select any spectrum region (point + conjugate, rectangle, ellipse, ring, orientation wedge, freehand brush) and see the band's energy overlaid on the image with adjustable opacity, showing exactly where that frequency content lives.
-- **Pixel to frequency:** drag any shape on the image to see that region's localized spectrum.
-- Filtering playground: low/high/band-pass, notch, directional and hand-drawn masks with live inverse-FFT reconstruction and a before/after divider.
-- Hover readout: cycles/px, wavelength, orientation, plus a live preview of the sinusoidal grating each spectrum point represents.
-- Progressive reconstruction: rebuild the image frequency-by-frequency.
-- A persistent hint bar and rich tooltips explain what every tool and option does.
+Open a photo (drop, paste or choose a file). FourierLens starts on **Overview**: automatic checks, file facts (JPEG quality, camera, editing software, AI generator metadata) and the photo itself. Five tabs group the forensic views:
 
-### Annotations & sessions
-- Pin multiple named, colored highlights with comments to spectrum regions, image regions, or single pixels.
-- Save/load sessions as JSON; export annotated views as PNG.
+| Tab | Views | What they reveal |
+|---|---|---|
+| **Color** | Brightness, Red, Green, Blue, Chroma blue, Chroma red, Equalized | Lighting direction, skin-tone and color-balance mismatches between a face and its surroundings, detail hidden in shadows |
+| **Noise** | Noise residual, Noise level | Pasted or generated regions that are smoother, blotchier or cleaner than the camera noise around them |
+| **Compression** | Error level (ELA), JPEG ghost | Regions saved a different number of times or at a different JPEG quality than the rest |
+| **Blending** | Blending boundary, Sharpness | The seam where a face or object was blended in, and areas generated at a lower resolution |
+| **Frequency** | Fourier spectrum, DCT spectrum, Noise spectrum, power-by-frequency chart | Grids of spectral peaks left by GAN and diffusion upsampling, resizing and JPEG; unnatural spectral falloff |
 
-### Anomaly flagging
-Automatic detectors with human-readable explanations:
-- Isolated spectral peaks: periodic noise, moire, sensor interference.
-- Energy at multiples of 1/8 sampling rate: JPEG block-compression fingerprint.
-- Spectral slope deviations from the natural-image 1/f^2 law: over-sharpening, synthetic (GAN/diffusion) content, or upscaling/blur.
+Every view says in one or two sentences what to look for, with at most one setting (the JPEG quality for ELA and ghosts).
 
-### Batch mode
-- Analyze whole folders in parallel; per-image records include resolution, aspect ratio, hashes, and a configurable set of spectral metrics (radial power profile, spectral slope alpha, high-frequency energy ratio, entropy, orientation statistics, blur score, anomaly flags, and more).
-- Dataset-level mean spectrum and per-image spectral outlier ranking.
-- Export CSV / JSON / Parquet. Headless CLI for pipelines:
+**Compare.** The original sits next to the view. Zoom and pan are synced, and **Crosshair** marks the same pixel in both. The status bar shows the pixel position and RGB value, or the frequency, period and angle on a spectrum.
+
+**Annotate and download.** Draw rectangles, ellipses, arrows and freehand marks, add text notes, and label any mark from the Notes list. **Download** exports the side-by-side comparison, the current view or the original, with your notes, as PNG at full analysis resolution.
+
+**Automatic checks** point you at leads, never at verdicts: a region with almost no camera noise, generator metadata in the file, repeating spectral patterns, an unnatural spectral falloff. Each opens the view that shows it and zooms to the region.
+
+### Techniques
+
+| Technique | Reference |
+|---|---|
+| Error level analysis | N. Krawetz, *A Picture's Worth*, Black Hat 2007 |
+| JPEG ghosts | H. Farid, *Exposing Digital Forgeries from JPEG Ghosts*, IEEE TIFS 2009 |
+| Noise residuals | P. Zhou et al., *Learning Rich Features for Image Manipulation Detection*, CVPR 2018 |
+| Local noise level | B. Mahdian & S. Saic, *Using noise inconsistencies for blind image forensics*, IVC 2009; J. Immerkær, *Fast Noise Variance Estimation*, CVIU 1996 |
+| Blending boundary | Idea from L. Li et al., *Face X-ray for More General Face Forgery Detection*, CVPR 2020 (here computed from local statistics, not a trained network) |
+| Resolution inconsistency | Y. Li & S. Lyu, *Exposing DeepFake Videos By Detecting Face Warping Artifacts*, CVPRW 2019 |
+| Chroma inconsistency | S. McCloskey & M. Albright, *Detecting GAN-generated Imagery using Color Cues*, 2018 |
+| Fourier spectrum artifacts | X. Zhang et al., *Detecting and Simulating Artifacts in GAN Fake Images*, WIFS 2019; R. Durall et al., *Watch your Up-Convolution*, CVPR 2020 |
+| DCT spectrum | J. Frank et al., *Leveraging Frequency Analysis for Deep Fake Image Recognition*, ICML 2020 |
+| Noise-residual spectrum | R. Corvi et al., *On the detection of synthetic images generated by diffusion models*, ICASSP 2023 |
+
+These are inspection aids. None of them proves an image is fake or real, and modern generators followed by recompression can hide every one of these traces.
+
+### Headless CLI
 
 ```bash
-fourierlens batch ./my_dataset --recursive --export report.parquet
-fourierlens analyze photo.png --json
+fourierlens analyze photo.jpg --json                         # metrics + spectral flags for one image
+fourierlens batch ./dataset --recursive --export report.csv  # dataset audit: CSV / JSON / Parquet
 ```
-
-### Compare mode
-Load two images side by side and view the difference of their spectra, the classic way to spot how a generated or processed image departs from a real one.
 
 ## Supported formats
 

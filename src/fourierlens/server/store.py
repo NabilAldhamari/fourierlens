@@ -1,8 +1,8 @@
-"""In-memory image store with LRU eviction and per-image FFT caching.
+"""In-memory image store with LRU eviction and per-image render caching.
 
-A local single-user tool: no persistence, no auth. Uploaded images and their
-computed spectra live in RAM; the FFT cache means dragging a slider only pays
-for the inverse transform, not a recompute of the forward one.
+A local single-user tool: no persistence, no auth. Uploaded images live in RAM
+as 8-bit RGB; rendered views are cached as PNG bytes so flipping between tabs
+or sweeping a slider back costs nothing.
 """
 
 from __future__ import annotations
@@ -12,90 +12,65 @@ import uuid
 from collections import OrderedDict
 
 import numpy as np
+from PIL import Image
 
-from ..core.fft import compute_fft
-from ..core.io import LoadedImage, to_channel
-from ..core.preprocess import apply_preprocess
+from ..core.forensics import block_features, to_rgb8
+from ..core.io import LoadedImage
 
-MAX_IMAGES = 16
-MAX_FFTS_PER_IMAGE = 4
-MAX_CHANNELS_PER_IMAGE = 4
+MAX_IMAGES = 8
+MAX_RENDERS_PER_IMAGE = 32
 
-# Interactive analysis cap: FFT/metrics/detectors on a 20+ MP photo take many
-# seconds per request and make the UI feel broken. The explorer works on a
-# downscaled copy above this size (original dimensions stay in meta; the
-# headless CLI/batch pipeline always uses full resolution).
-MAX_ANALYSIS_DIM = 2048
+# Above this size the image is downscaled for analysis. Downscaling erases
+# compression and noise traces, so the UI warns when it happens; the cap keeps
+# a 50 MP photo from taking a minute per view.
+MAX_ANALYSIS_DIM = 4096
 
 
-def _downscale_for_analysis(pixels, meta: dict):
-    h, w = pixels.shape[:2]
+def _prepare(pixels: np.ndarray, meta: dict) -> np.ndarray:
+    rgb8 = to_rgb8(pixels)
+    h, w = rgb8.shape[:2]
     long_side = max(h, w)
-    if long_side <= MAX_ANALYSIS_DIM:
-        meta["analysis_width"] = w
-        meta["analysis_height"] = h
-        meta["downscaled_for_analysis"] = False
-        return pixels
-    from PIL import Image as _PILImage
-
-    scale = MAX_ANALYSIS_DIM / long_side
-    nw, nh = max(1, round(w * scale)), max(1, round(h * scale))
-    arr8 = (np.clip(pixels, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
-    mode = "RGB" if arr8.ndim == 3 else "L"
-    small = _PILImage.fromarray(arr8, mode=mode).resize((nw, nh), _PILImage.LANCZOS)
-    meta["analysis_width"] = nw
-    meta["analysis_height"] = nh
-    meta["downscaled_for_analysis"] = True
-    return np.asarray(small, dtype=np.float32) / 255.0
+    meta["downscaled_for_analysis"] = long_side > MAX_ANALYSIS_DIM
+    if long_side > MAX_ANALYSIS_DIM:
+        scale = MAX_ANALYSIS_DIM / long_side
+        size = (max(1, round(w * scale)), max(1, round(h * scale)))
+        rgb8 = np.asarray(Image.fromarray(rgb8).resize(size, Image.LANCZOS))
+    meta["analysis_width"] = rgb8.shape[1]
+    meta["analysis_height"] = rgb8.shape[0]
+    return rgb8
 
 
 class ImageRecord:
     def __init__(self, image: LoadedImage):
         self.meta = image.meta
-        self.pixels = _downscale_for_analysis(image.pixels, self.meta)
-        self._ffts: OrderedDict[tuple, np.ndarray] = OrderedDict()
-        self._channels: OrderedDict[tuple, np.ndarray] = OrderedDict()
-        self._analysis: dict[str, object] = {}
+        self.rgb8 = _prepare(image.pixels, self.meta)
+        self._renders: OrderedDict[tuple, bytes] = OrderedDict()
+        self._cache: dict[str, object] = {}
         self._lock = threading.Lock()
 
-    def channel(self, mode: str, preprocess: str = "none", pre_amount: float = 1.0) -> np.ndarray:
-        """Channel extraction + optional pre-filter, cached (pre-filters are the
-        analysis input everywhere, so they must be identical across endpoints)."""
-        key = (mode, preprocess, round(float(pre_amount), 3))
+    def render(self, key: tuple, compute) -> bytes:
         with self._lock:
-            if key in self._channels:
-                self._channels.move_to_end(key)
-                return self._channels[key]
-        img2d = apply_preprocess(to_channel(self.pixels, mode), preprocess, pre_amount)
-        with self._lock:
-            self._channels[key] = img2d
-            self._channels.move_to_end(key)
-            while len(self._channels) > MAX_CHANNELS_PER_IMAGE:
-                self._channels.popitem(last=False)
-        return img2d
-
-    def fft(self, channel: str, window: str, preprocess: str = "none", pre_amount: float = 1.0) -> np.ndarray:
-        key = (channel, window, preprocess, round(float(pre_amount), 3))
-        with self._lock:
-            if key in self._ffts:
-                self._ffts.move_to_end(key)
-                return self._ffts[key]
-        F = compute_fft(self.channel(channel, preprocess, pre_amount), window)
-        with self._lock:
-            self._ffts[key] = F
-            self._ffts.move_to_end(key)
-            while len(self._ffts) > MAX_FFTS_PER_IMAGE:
-                self._ffts.popitem(last=False)
-        return F
-
-    def analysis_cache(self, key: str, compute):
-        with self._lock:
-            if key in self._analysis:
-                return self._analysis[key]
+            if key in self._renders:
+                self._renders.move_to_end(key)
+                return self._renders[key]
         value = compute()
         with self._lock:
-            self._analysis[key] = value
+            self._renders[key] = value
+            while len(self._renders) > MAX_RENDERS_PER_IMAGE:
+                self._renders.popitem(last=False)
         return value
+
+    def cached(self, key: str, compute):
+        with self._lock:
+            if key in self._cache:
+                return self._cache[key]
+        value = compute()
+        with self._lock:
+            self._cache[key] = value
+        return value
+
+    def features(self) -> dict:
+        return self.cached("block_features", lambda: block_features(self.rgb8))
 
 
 class ImageStore:
@@ -109,7 +84,6 @@ class ImageStore:
         image_id = uuid.uuid4().hex[:12]
         with self._lock:
             self._records[image_id] = record
-            self._records.move_to_end(image_id)
             while len(self._records) > self._max:
                 self._records.popitem(last=False)
         return image_id, record
