@@ -1,6 +1,6 @@
 import { api } from "../api";
-import { useApp } from "../store";
-import { viewports } from "../viewport";
+import { useApp, useCurrentView, viewsInTab } from "../store";
+import { actualSizeAllViewports, fitAllViewports } from "../viewport";
 import Icon from "./Icons";
 import Pane from "./Pane";
 import SidePanel from "./SidePanel";
@@ -11,7 +11,6 @@ export default function Workspace() {
   const config = useApp((s) => s.config)!;
   const image = useApp((s) => s.image)!;
   const tab = useApp((s) => s.tab);
-  const viewByTab = useApp((s) => s.viewByTab);
   const paramByView = useApp((s) => s.paramByView);
   const setView = useApp((s) => s.setView);
   const compare = useApp((s) => s.compare);
@@ -19,20 +18,11 @@ export default function Workspace() {
   const toggleCompare = useApp((s) => s.toggleCompare);
   const toggleCrosshair = useApp((s) => s.toggleCrosshair);
 
-  const views = config.views.filter((v) => v.tab === tab);
-  const view = views.find((v) => v.id === viewByTab[tab]) ?? views[0];
+  const view = useCurrentView();
   if (!view) return null;
+  const views = viewsInTab(config, tab);
   const param = view.param ? paramByView[view.id] : undefined;
   const title = view.label + (view.param ? ` · ${view.param.label} ${param}` : "");
-
-  const fit = () => {
-    viewports.image.reset();
-    viewports.spectrum.reset();
-  };
-  const actual = () => {
-    viewports.image.actualSize();
-    viewports.spectrum.actualSize();
-  };
 
   return (
     <div className="workspace">
@@ -56,10 +46,10 @@ export default function Workspace() {
           <Icon name="crosshair" /> Crosshair
         </button>
         <span className="divider" />
-        <button className="btn icon" onClick={fit} title="Fit to window (F, or double-click)">
+        <button className="btn icon" onClick={fitAllViewports} title="Fit to window (F, or double-click)">
           <Icon name="fit" />
         </button>
-        <button className="btn icon" onClick={actual} title="Actual pixels (1 image pixel = 1 screen pixel)">
+        <button className="btn icon" onClick={actualSizeAllViewports} title="Actual pixels (1 image pixel = 1 screen pixel)">
           <Icon name="actual" />
         </button>
       </div>

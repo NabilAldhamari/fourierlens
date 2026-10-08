@@ -35,8 +35,10 @@ from scipy.ndimage import (
     sobel,
     uniform_filter,
 )
+from scipy.ndimage import median as nd_median
 
-from .fft import power_spectrum, radius_grid
+from .fft import compute_fft, power_spectrum, radius_grid, to_uint8
+from .io import LUMA_WEIGHTS
 from .metrics import radial_profile, spectral_slope
 
 # --------------------------------------------------------------------------
@@ -65,6 +67,8 @@ class ViewInfo:
     param: dict | None = field(default=None)
 
 
+_DEFAULT_ELA_QUALITY = 90
+_DEFAULT_GHOST_QUALITY = 75
 _QUALITY = {"name": "quality", "label": "JPEG quality", "min": 50, "max": 100, "step": 1}
 
 VIEWS: list[ViewInfo] = [
@@ -124,7 +128,7 @@ VIEWS: list[ViewInfo] = [
         "texture elsewhere was probably saved a different number of times.",
         "|image − JPEG(image, quality)|, maximum over RGB, amplified.",
         "Krawetz, 2007",
-        param={**_QUALITY, "default": 90},
+        param={**_QUALITY, "default": _DEFAULT_ELA_QUALITY},
     ),
     ViewInfo(
         "ghost", "compression", "JPEG ghost",
@@ -133,7 +137,7 @@ VIEWS: list[ViewInfo] = [
         "JPEG. Flat areas (sky, walls) glow at every quality and can be ignored.",
         "Block-averaged squared difference to a re-save at the chosen quality, inverted.",
         "Farid, 2009",
-        param={**_QUALITY, "default": 75},
+        param={**_QUALITY, "default": _DEFAULT_GHOST_QUALITY},
     ),
     ViewInfo(
         "boundary", "blending", "Blending boundary",
@@ -199,13 +203,12 @@ def catalog() -> dict:
 # --------------------------------------------------------------------------
 # helpers
 
-_LUMA = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
 BLOCK = 8
 
 
 def to_rgb8(pixels01: np.ndarray) -> np.ndarray:
     """Float [0,1] HxW or HxWx3 -> uint8 HxWx3."""
-    arr = (np.clip(pixels01, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+    arr = to_uint8(pixels01)
     if arr.ndim == 2:
         arr = np.stack([arr] * 3, axis=-1)
     return np.ascontiguousarray(arr)
@@ -213,7 +216,7 @@ def to_rgb8(pixels01: np.ndarray) -> np.ndarray:
 
 def luma(rgb8: np.ndarray) -> np.ndarray:
     """Luminance in 0..255 float32."""
-    return rgb8.astype(np.float32) @ _LUMA
+    return rgb8.astype(np.float32) @ LUMA_WEIGHTS
 
 
 def _stretch(x: np.ndarray, lo_pct: float = 0.5, hi_pct: float = 99.5, min_span: float = 1e-6) -> np.ndarray:
@@ -221,10 +224,6 @@ def _stretch(x: np.ndarray, lo_pct: float = 0.5, hi_pct: float = 99.5, min_span:
     if hi - lo < min_span:
         hi = lo + min_span
     return np.clip((x - lo) / (hi - lo), 0.0, 1.0)
-
-
-def _gray8(x01: np.ndarray) -> np.ndarray:
-    return (np.clip(x01, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
 
 
 def _lut(stops: list[tuple[float, tuple[int, int, int]]]) -> np.ndarray:
@@ -247,11 +246,11 @@ DIVERGING = _lut([
 
 
 def heat(x01: np.ndarray) -> np.ndarray:
-    return HEAT[_gray8(x01)]
+    return HEAT[to_uint8(x01)]
 
 
 def diverging(log2_ratio: np.ndarray, limit: float = 2.0) -> np.ndarray:
-    return DIVERGING[_gray8((np.clip(log2_ratio, -limit, limit) + limit) / (2 * limit))]
+    return DIVERGING[to_uint8((np.clip(log2_ratio, -limit, limit) + limit) / (2 * limit))]
 
 
 def _jpeg_roundtrip(rgb8: np.ndarray, quality: int) -> np.ndarray:
@@ -260,6 +259,12 @@ def _jpeg_roundtrip(rgb8: np.ndarray, quality: int) -> np.ndarray:
     buf.seek(0)
     with Image.open(buf) as im:
         return np.asarray(im.convert("RGB"))
+
+
+def _jpeg_error(rgb8: np.ndarray, quality: int) -> np.ndarray:
+    """Per-pixel max-over-RGB absolute change after a JPEG re-save."""
+    resaved = _jpeg_roundtrip(rgb8, quality)
+    return np.abs(rgb8.astype(np.int16) - resaved.astype(np.int16)).max(axis=-1)
 
 
 def _upsample(blocks: np.ndarray, h: int, w: int) -> np.ndarray:
@@ -300,9 +305,7 @@ def block_features(rgb8: np.ndarray) -> dict[str, np.ndarray]:
     lap = np.abs(convolve(gray, _LAPLACE, mode="reflect"))
     sharp = _block_reduce(lap, np.mean)
 
-    rec = _jpeg_roundtrip(rgb8, 90)
-    ela = np.abs(rgb8.astype(np.int16) - rec.astype(np.int16)).max(axis=-1).astype(np.float32)
-    ela_b = _block_reduce(ela, np.mean)
+    ela_b = _block_reduce(_jpeg_error(rgb8, _DEFAULT_ELA_QUALITY).astype(np.float32), np.mean)
 
     feats = {}
     for name, v in (("noise", sigma), ("sharpness", sharp), ("ela", ela_b)):
@@ -322,74 +325,113 @@ def _robust_z(v: np.ndarray) -> np.ndarray:
 # --------------------------------------------------------------------------
 # views
 
+# Views built from block_features(); callers may pass cached features.
+BLOCK_FEATURE_VIEWS = frozenset({"noise_level", "sharpness", "boundary"})
+
 
 def render_view(view: str, rgb8: np.ndarray, quality: int | None = None, feats: dict | None = None) -> np.ndarray:
     """Render one forensic view. `feats` lets callers reuse block_features()."""
     if view not in VIEW_BY_ID:
         raise ValueError(f"Unknown view {view!r}; expected one of {sorted(VIEW_BY_ID)}")
-    h, w = rgb8.shape[:2]
+    if view in BLOCK_FEATURE_VIEWS:
+        return _BLOCK_RENDERERS[view](feats or block_features(rgb8), rgb8.shape[:2])
+    if view in _QUALITY_RENDERERS:
+        return _QUALITY_RENDERERS[view](rgb8, quality)
+    return _PLAIN_RENDERERS[view](rgb8)
 
-    if view == "luma":
-        return _gray8(luma(rgb8) / 255.0)
-    if view in ("red", "green", "blue"):
-        return rgb8[:, :, ("red", "green", "blue").index(view)].copy()
-    if view in ("chroma_cb", "chroma_cr"):
-        r, g, b = (rgb8[:, :, i].astype(np.float32) for i in range(3))
-        if view == "chroma_cb":
-            c = -0.168736 * r - 0.331264 * g + 0.5 * b
-        else:
-            c = 0.5 * r - 0.418688 * g - 0.081312 * b
-        return _gray8(_stretch(c, min_span=8.0))
-    if view == "equalized":
-        ycc = np.asarray(Image.fromarray(rgb8).convert("YCbCr")).copy()
-        y = ycc[:, :, 0]
-        hist = np.bincount(y.ravel(), minlength=256).astype(np.float64)
-        cdf = hist.cumsum()
-        cdf = (cdf - cdf.min()) / max(cdf.max() - cdf.min(), 1.0)
-        ycc[:, :, 0] = (cdf[y] * 255.0 + 0.5).astype(np.uint8)
-        return np.asarray(Image.fromarray(ycc, mode="YCbCr").convert("RGB"))
 
-    if view == "noise":
-        res = np.abs(noise_residual(luma(rgb8)))
-        # square root lifts faint grain in flat areas without saturating texture
-        return _gray8(np.sqrt(res / max(float(np.percentile(res, 99.5)), 2.0)))
+# color
 
-    if view == "ela":
-        q = int(quality or 90)
-        diff = np.abs(rgb8.astype(np.int16) - _jpeg_roundtrip(rgb8, q).astype(np.int16)).max(axis=-1)
-        return heat(diff / max(float(np.percentile(diff, 99.5)), 6.0))
-    if view == "ghost":
-        q = int(quality or 75)
-        d = ((rgb8.astype(np.float32) - _jpeg_roundtrip(rgb8, q).astype(np.float32)) ** 2).mean(axis=-1)
-        d = uniform_filter(d, size=2 * BLOCK, mode="reflect")
-        span = float(d.max() - d.min())
-        norm = (d - d.min()) / span if span > 1e-9 else np.zeros_like(d)
-        return heat(1.0 - norm)
 
-    if view in ("noise_level", "sharpness", "boundary"):
-        feats = feats or block_features(rgb8)
-        if view == "boundary":
-            grads = []
-            for v in feats.values():
-                z = gaussian_filter(_robust_z(v), 0.7)
-                gy, gx = np.gradient(z)
-                grads.append(gx**2 + gy**2)
-            b = np.sqrt(np.mean(grads, axis=0))
-            return heat(_upsample(b, h, w) / max(float(np.percentile(b, 99.5)), 1.0))
-        v = gaussian_filter(feats["noise" if view == "noise_level" else "sharpness"], 0.8)
+def _render_luma(rgb8: np.ndarray) -> np.ndarray:
+    return to_uint8(luma(rgb8) / 255.0)
+
+
+def _channel_renderer(index: int):
+    return lambda rgb8: rgb8[:, :, index].copy()
+
+
+def _chroma_renderer(weights: tuple[float, float, float]):
+    def render(rgb8: np.ndarray) -> np.ndarray:
+        chroma = rgb8.astype(np.float32) @ np.array(weights, dtype=np.float32)
+        return to_uint8(_stretch(chroma, min_span=8.0))
+
+    return render
+
+
+def _render_equalized(rgb8: np.ndarray) -> np.ndarray:
+    ycc = np.asarray(Image.fromarray(rgb8).convert("YCbCr")).copy()
+    y = ycc[:, :, 0]
+    cdf = np.bincount(y.ravel(), minlength=256).astype(np.float64).cumsum()
+    cdf = (cdf - cdf.min()) / max(cdf.max() - cdf.min(), 1.0)
+    ycc[:, :, 0] = to_uint8(cdf[y])
+    return np.asarray(Image.fromarray(ycc, mode="YCbCr").convert("RGB"))
+
+
+# noise
+
+
+def _render_noise(rgb8: np.ndarray) -> np.ndarray:
+    res = np.abs(noise_residual(luma(rgb8)))
+    # square root lifts faint grain in flat areas without saturating texture
+    return to_uint8(np.sqrt(res / max(float(np.percentile(res, 99.5)), 2.0)))
+
+
+# compression
+
+
+def _render_ela(rgb8: np.ndarray, quality: int | None) -> np.ndarray:
+    diff = _jpeg_error(rgb8, quality or _DEFAULT_ELA_QUALITY)
+    return heat(diff / max(float(np.percentile(diff, 99.5)), 6.0))
+
+
+def _render_ghost(rgb8: np.ndarray, quality: int | None) -> np.ndarray:
+    resaved = _jpeg_roundtrip(rgb8, quality or _DEFAULT_GHOST_QUALITY).astype(np.float32)
+    d = ((rgb8.astype(np.float32) - resaved) ** 2).mean(axis=-1)
+    d = uniform_filter(d, size=2 * BLOCK, mode="reflect")
+    span = float(d.max() - d.min())
+    norm = (d - d.min()) / span if span > 1e-9 else np.zeros_like(d)
+    return heat(1.0 - norm)
+
+
+# blending (block features)
+
+
+def _render_boundary(feats: dict, shape: tuple[int, int]) -> np.ndarray:
+    grads = []
+    for v in feats.values():
+        gy, gx = np.gradient(gaussian_filter(_robust_z(v), 0.7))
+        grads.append(gx**2 + gy**2)
+    b = np.sqrt(np.mean(grads, axis=0))
+    return heat(_upsample(b, *shape) / max(float(np.percentile(b, 99.5)), 1.0))
+
+
+def _log_ratio_renderer(feature: str):
+    def render(feats: dict, shape: tuple[int, int]) -> np.ndarray:
+        v = gaussian_filter(feats[feature], 0.8)
         log2_ratio = (v - float(np.median(v))) / np.log(2.0)
-        return diverging(_upsample(log2_ratio, h, w))
+        return diverging(_upsample(log2_ratio, *shape))
 
+    return render
+
+
+# frequency
+
+
+def _render_fourier(rgb8: np.ndarray) -> np.ndarray:
     gray = luma(rgb8)
-    if view == "fourier":
-        win = np.outer(np.hanning(h), np.hanning(w)).astype(np.float32)
-        mag = np.log1p(np.abs(np.fft.fftshift(np.fft.fft2((gray - gray.mean()) * win))))
-        return heat(_stretch(mag, 1.0, 99.9))
-    if view == "dct":
-        mag = np.log1p(np.abs(sfft.dctn(gray - gray.mean(), norm="ortho")))
-        return heat(_stretch(mag, 1.0, 99.9))
-    # residual_spectrum
-    return heat(np.clip(residual_spectrum_decades(gray), 0.0, 2.5) / 2.5)
+    mag = np.log1p(np.abs(np.fft.fftshift(compute_fft(gray - gray.mean(), window="hann"))))
+    return heat(_stretch(mag, 1.0, 99.9))
+
+
+def _render_dct(rgb8: np.ndarray) -> np.ndarray:
+    gray = luma(rgb8)
+    mag = np.log1p(np.abs(sfft.dctn(gray - gray.mean(), norm="ortho")))
+    return heat(_stretch(mag, 1.0, 99.9))
+
+
+def _render_residual_spectrum(rgb8: np.ndarray) -> np.ndarray:
+    return heat(np.clip(residual_spectrum_decades(luma(rgb8)), 0.0, 2.5) / 2.5)
 
 
 def residual_spectrum_decades(gray: np.ndarray, nbins: int = 192) -> np.ndarray:
@@ -398,17 +440,33 @@ def residual_spectrum_decades(gray: np.ndarray, nbins: int = 192) -> np.ndarray:
     The median (not the mean) per ring keeps a few strong peaks from lifting
     their whole ring and hiding each other.
     """
-    from scipy.ndimage import median as nd_median
-
-    h, w = gray.shape
-    win = np.outer(np.hanning(h), np.hanning(w)).astype(np.float32)
-    log_psd = np.log10(power_spectrum(np.fft.fft2(noise_residual(gray) * win)) + 1e-12)
-    r = radius_grid((h, w))
+    log_psd = np.log10(power_spectrum(compute_fft(noise_residual(gray), window="hann")) + 1e-12)
+    r = radius_grid(gray.shape)
     idx = np.minimum((r / r.max() * nbins).astype(np.int32), nbins - 1)
     present = np.unique(idx)
     med = np.asarray(nd_median(log_psd, labels=idx, index=present))
-    baseline = np.interp(idx, present, med)
-    return log_psd - baseline
+    return log_psd - np.interp(idx, present, med)
+
+
+_PLAIN_RENDERERS = {
+    "luma": _render_luma,
+    "red": _channel_renderer(0),
+    "green": _channel_renderer(1),
+    "blue": _channel_renderer(2),
+    "chroma_cb": _chroma_renderer((-0.168736, -0.331264, 0.5)),
+    "chroma_cr": _chroma_renderer((0.5, -0.418688, -0.081312)),
+    "equalized": _render_equalized,
+    "noise": _render_noise,
+    "fourier": _render_fourier,
+    "dct": _render_dct,
+    "residual_spectrum": _render_residual_spectrum,
+}
+_QUALITY_RENDERERS = {"ela": _render_ela, "ghost": _render_ghost}
+_BLOCK_RENDERERS = {
+    "noise_level": _log_ratio_renderer("noise"),
+    "sharpness": _log_ratio_renderer("sharpness"),
+    "boundary": _render_boundary,
+}
 
 
 # --------------------------------------------------------------------------
@@ -471,9 +529,7 @@ def forensic_checks(rgb8: np.ndarray, feats: dict | None = None) -> list[dict]:
 def spectrum_profile(rgb8: np.ndarray, nbins: int = 48) -> dict:
     """Azimuthally averaged power spectrum with its 1/f^alpha fit, for the chart."""
     gray = luma(rgb8) / 255.0
-    h, w = gray.shape
-    win = np.outer(np.hanning(h), np.hanning(w))
-    psd = power_spectrum(np.fft.fft2((gray - gray.mean()) * win))
+    psd = power_spectrum(compute_fft(gray - gray.mean(), window="hann"))
     freqs, power = radial_profile(psd, nbins=nbins)
     alpha, r2 = spectral_slope(freqs, power)
     keep = power > 0

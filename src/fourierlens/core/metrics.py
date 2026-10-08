@@ -11,25 +11,7 @@ from __future__ import annotations
 import numpy as np
 from scipy.ndimage import laplace
 
-from .fft import compute_fft, power_spectrum, radius_grid
-
-# Registry: metric key -> (label, group) used by the UI column chooser and CLI.
-METRIC_INFO = {
-    "spectral_slope": ("Spectral slope α (P∝1/f^α; natural images ≈ 2)", "spectrum"),
-    "slope_r2": ("Slope fit R²", "spectrum"),
-    "hf_energy_ratio": ("High-frequency energy ratio (r > 0.5 Nyquist)", "spectrum"),
-    "mf_energy_ratio": ("Mid-frequency energy ratio (0.1 < r ≤ 0.5)", "spectrum"),
-    "spectral_centroid": ("Spectral centroid (mean radial freq)", "spectrum"),
-    "spectral_bandwidth": ("Spectral bandwidth (radial std dev)", "spectrum"),
-    "spectral_entropy": ("Spectral entropy (0 = single tone, 1 = white noise)", "spectrum"),
-    "spectral_flatness": ("Spectral flatness (geometric/arithmetic mean)", "spectrum"),
-    "dominant_orientation_deg": ("Dominant orientation (degrees)", "orientation"),
-    "orientation_anisotropy": ("Orientation anisotropy (0 = isotropic)", "orientation"),
-    "blur_score": ("Blur score (variance of Laplacian; higher = sharper)", "spatial"),
-    "mean_intensity": ("Mean intensity", "spatial"),
-    "std_intensity": ("Intensity std dev", "spatial"),
-    "rms_contrast": ("RMS contrast", "spatial"),
-}
+from .fft import compute_fft, normalized_freq_grid, power_spectrum, radius_grid
 
 
 def radial_profile(psd: np.ndarray, nbins: int = 64) -> tuple[np.ndarray, np.ndarray]:
@@ -63,13 +45,10 @@ def spectral_slope(freqs: np.ndarray, power: np.ndarray, fmin: float = 0.02, fma
 
 def orientation_histogram(psd: np.ndarray, nbins: int = 36, rmin: float = 0.02) -> np.ndarray:
     """Energy per orientation bin over [0, 180) degrees, normalized to sum 1."""
-    h, w = psd.shape
-    fy = (np.arange(h) - h // 2) / (h / 2.0)
-    fx = (np.arange(w) - w // 2) / (w / 2.0)
-    FY, FX = np.meshgrid(fy, fx, indexing="ij")
-    r = np.hypot(FY, FX)
+    fy, fx = normalized_freq_grid(psd.shape)
+    r = np.hypot(fy, fx)
     valid = (r >= rmin) & (r <= 1.0)
-    ang = np.degrees(np.arctan2(FY, FX)) % 180.0
+    ang = np.degrees(np.arctan2(fy, fx)) % 180.0
     idx = np.clip((ang[valid] / 180.0 * nbins).astype(int), 0, nbins - 1)
     hist = np.bincount(idx, weights=psd[valid], minlength=nbins)
     total = hist.sum() or 1.0

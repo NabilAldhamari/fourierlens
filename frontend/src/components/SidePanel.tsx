@@ -8,7 +8,7 @@ export default function SidePanel({ view }: { view: ViewInfo }) {
   const findings = useApp((s) => s.findings);
   const value = useApp((s) => (view.param ? s.paramByView[view.id] : undefined));
   const setParam = useApp((s) => s.setParam);
-  const compression = view.tab === "compression" || view.tab === "noise";
+  const weakenedByDownscaling = view.tab === "compression" || view.tab === "noise";
 
   return (
     <aside className="side">
@@ -40,7 +40,7 @@ export default function SidePanel({ view }: { view: ViewInfo }) {
           </label>
         )}
 
-        {compression && image.meta.downscaled_for_analysis && (
+        {weakenedByDownscaling && image.meta.downscaled_for_analysis && (
           <p className="callout warn small">This photo was downscaled for analysis, which weakens these traces.</p>
         )}
 

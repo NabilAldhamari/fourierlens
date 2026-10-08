@@ -21,7 +21,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         host=args.host,
         port=args.port,
         open_browser=not args.no_browser,
-        dev=getattr(args, "dev", False),
+        dev=args.dev,
     )
     return 0
 
@@ -43,7 +43,7 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
 
     print(f"\n{img.meta['filename']}  {img.meta['width']}x{img.meta['height']}  "
           f"{img.meta['format']}  {img.meta['bit_depth']}-bit  sha256:{img.meta['sha256']}")
-    print("\nMetrics (luma channel):" if args.channel == "luma" else f"\nMetrics ({args.channel} channel):")
+    print(f"\nMetrics ({args.channel} channel):")
     for k, v in scalar_metrics(metrics).items():
         print(f"  {k:28s} {v}")
     if flags:
@@ -61,40 +61,51 @@ def _cmd_batch(args: argparse.Namespace) -> int:
     from .core.io import iter_image_files
 
     root = Path(args.directory)
+    out = Path(args.export) if args.export else root / "fourierlens_report.csv"
+    writer = _REPORT_WRITERS.get(out.suffix.lower())
+    if writer is None:
+        print(f"Unknown export format {out.suffix!r}; use {', '.join(_REPORT_WRITERS)}", file=sys.stderr)
+        return 1
     paths = list(iter_image_files(root, recursive=args.recursive))
     if not paths:
         print(f"No supported images found in {root}", file=sys.stderr)
         return 1
     print(f"Analyzing {len(paths)} images with {args.workers or 'auto'} workers...")
 
-    def progress(done: int, total: int, rec: dict) -> None:
-        status = "ERR " if rec.get("error") else "ok  "
-        print(f"  [{done}/{total}] {status}{rec.get('filename', '?')}")
-
-    records = run_batch(paths, workers=args.workers, progress=progress)
-    stats = dataset_statistics(records)
+    records = run_batch(paths, workers=args.workers, progress=_print_progress)
+    scores = dataset_statistics(records)["outlier_scores"]
     for rec in records:
-        key = rec.get("path", rec.get("filename"))
-        rec["spectral_outlier_score"] = stats["outlier_scores"].get(key)
+        rec["spectral_outlier_score"] = scores.get(rec["path"])
 
     rows = records_to_table(records)
-    out = Path(args.export) if args.export else root / "fourierlens_report.csv"
-    suffix = out.suffix.lower()
-    import pandas as pd
-
-    df = pd.DataFrame(rows)
-    if suffix == ".csv":
-        df.to_csv(out, index=False, encoding="utf-8-sig")  # BOM so Excel decodes UTF-8
-    elif suffix == ".json":
-        out.write_text(json.dumps(rows, indent=2), encoding="utf-8")
-    elif suffix == ".parquet":
-        df.to_parquet(out, index=False)
-    else:
-        print(f"Unknown export format {suffix!r}; use .csv, .json, or .parquet", file=sys.stderr)
-        return 1
-    errors = sum(1 for r in records if r.get("error"))
+    writer(rows, out)
+    errors = sum(1 for r in records if r["error"])
     print(f"\nWrote {len(rows)} rows -> {out}" + (f"  ({errors} files failed)" if errors else ""))
     return 0
+
+
+def _print_progress(done: int, total: int, rec: dict) -> None:
+    status = "ERR " if rec["error"] else "ok  "
+    print(f"  [{done}/{total}] {status}{rec['filename']}")
+
+
+def _write_csv(rows: list[dict], out: Path) -> None:
+    import pandas as pd
+
+    pd.DataFrame(rows).to_csv(out, index=False, encoding="utf-8-sig")  # BOM so Excel decodes UTF-8
+
+
+def _write_json(rows: list[dict], out: Path) -> None:
+    out.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+
+
+def _write_parquet(rows: list[dict], out: Path) -> None:
+    import pandas as pd
+
+    pd.DataFrame(rows).to_parquet(out, index=False)
+
+
+_REPORT_WRITERS = {".csv": _write_csv, ".json": _write_json, ".parquet": _write_parquet}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -119,14 +130,14 @@ def main(argv: list[str] | None = None) -> int:
     p_batch.add_argument("--workers", type=int, default=0, help="0 = one per CPU core")
     p_batch.add_argument("--export", help="output path: .csv, .json, or .parquet")
 
+    p_serve.set_defaults(handler=_cmd_serve)
+    p_an.set_defaults(handler=_cmd_analyze)
+    p_batch.set_defaults(handler=_cmd_batch)
+
     args = parser.parse_args(argv)
-    if args.command == "analyze":
-        return _cmd_analyze(args)
-    if args.command == "batch":
-        return _cmd_batch(args)
     if args.command is None:
         args = p_serve.parse_args([])
-    return _cmd_serve(args)
+    return args.handler(args)
 
 
 if __name__ == "__main__":

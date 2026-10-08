@@ -24,7 +24,15 @@ from pydantic import BaseModel
 
 from .. import __version__
 from ..core.anomalies import detect_all
-from ..core.forensics import VIEW_BY_ID, catalog, forensic_checks, luma, render_view, spectrum_profile
+from ..core.forensics import (
+    BLOCK_FEATURE_VIEWS,
+    VIEW_BY_ID,
+    catalog,
+    forensic_checks,
+    luma,
+    render_view,
+    spectrum_profile,
+)
 from ..core.io import SUPPORTED_EXTENSIONS, load_image, load_image_bytes
 from .store import ImageStore
 
@@ -203,7 +211,7 @@ def view_png(image_id: str, view: str, quality: int | None = None):
             raise HTTPException(422, f"quality must be between {info.param['min']} and {info.param['max']}")
     else:
         q = None
-    feats = record.features() if view in ("noise_level", "sharpness", "boundary") else None
+    feats = record.features() if view in BLOCK_FEATURE_VIEWS else None
     data = record.render((view, q), lambda: _png_bytes(render_view(view, record.rgb8, quality=q, feats=feats)))
     return _png(data)
 
@@ -211,11 +219,8 @@ def view_png(image_id: str, view: str, quality: int | None = None):
 # --------------------------------------------------------------------------
 # automatic checks
 
-# spectral detectors (anomalies.py) all read best in the Fourier view
-_SPECTRAL_VIEW = {
-    "periodic_noise": "fourier", "axis_aligned_peaks": "fourier", "jpeg_grid": "residual_spectrum",
-    "excess_high_frequency": "fourier", "low_detail": "fourier", "high_hf_energy": "fourier",
-}
+# spectral detectors (anomalies.py) read best in the Fourier view, except the JPEG grid
+_SPECTRAL_VIEW_OVERRIDES = {"jpeg_grid": "residual_spectrum"}
 
 
 def _metadata_flags(meta: dict) -> list[dict]:
@@ -244,22 +249,31 @@ def _metadata_flags(meta: dict) -> list[dict]:
 
 def _findings(record) -> dict:
     rgb8 = record.rgb8
-    flags = _metadata_flags(record.meta) + forensic_checks(rgb8, record.features())
-    for f in detect_all(luma(rgb8) / 255.0):
-        f.pop("locations", None)
-        if f["type"] == "jpeg_grid" and record.meta.get("format") == "JPEG":
-            continue  # expected in every JPEG: not a lead
+    flags = [
+        *_metadata_flags(record.meta),
+        *forensic_checks(rgb8, record.features()),
+        *_spectral_flags(luma(rgb8) / 255.0, is_jpeg=record.meta.get("format") == "JPEG"),
+    ]
+    flags.sort(key=lambda f: f["severity"], reverse=True)
+    return {"flags": _clean_nans(flags), "spectrum": _clean_nans(spectrum_profile(rgb8))}
+
+
+def _spectral_flags(gray: np.ndarray, is_jpeg: bool) -> list[dict]:
+    flags = []
+    for f in detect_all(gray):
         if f["type"] == "jpeg_grid":
+            if is_jpeg:
+                continue  # expected in every JPEG: not a lead
             f["title"] = "Periodic 8-pixel grid"
             f["explanation"] = (
                 "There is extra energy at multiples of 1/8 cycles per pixel. This file is not a JPEG, "
                 "so either it was JPEG-compressed earlier and re-saved, or it was produced by 2×, 4× "
                 "or 8× upsampling, as in many image generators."
             )
-        f["view"] = _SPECTRAL_VIEW.get(f["type"], "fourier")
+        f.pop("locations", None)
+        f["view"] = _SPECTRAL_VIEW_OVERRIDES.get(f["type"], "fourier")
         flags.append(f)
-    flags.sort(key=lambda f: -f["severity"])
-    return {"flags": _clean_nans(flags), "spectrum": _clean_nans(spectrum_profile(rgb8))}
+    return flags
 
 
 @app.get("/api/images/{image_id}/findings")

@@ -51,6 +51,23 @@ export class Viewport extends Hub {
 
 export const viewports: Record<Space, Viewport> = { image: new Viewport(), spectrum: new Viewport() };
 
+export function fitAllViewports() {
+  viewports.image.reset();
+  viewports.spectrum.reset();
+}
+
+export function actualSizeAllViewports() {
+  viewports.image.actualSize();
+  viewports.spectrum.actualSize();
+}
+
+export async function decodeImage(url: string): Promise<HTMLImageElement> {
+  const img = new Image();
+  img.src = url;
+  await img.decode();
+  return img;
+}
+
 export interface HoverState {
   x: number;
   y: number;
@@ -77,9 +94,7 @@ class PixelSampler {
   async load(url: string) {
     if (url === this.url) return;
     this.url = url;
-    const img = new Image();
-    img.src = url;
-    await img.decode();
+    const img = await decodeImage(url);
     if (url !== this.url) return;
     const canvas = document.createElement("canvas");
     canvas.width = img.naturalWidth;

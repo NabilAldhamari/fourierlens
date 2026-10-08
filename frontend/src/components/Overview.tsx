@@ -1,13 +1,8 @@
 import { api, type Flag, type ImageMeta } from "../api";
 import { useApp } from "../store";
+import { SEVERITY_LABELS, severityLevel } from "../severity";
 import { viewports } from "../viewport";
 import Pane from "./Pane";
-
-function level(severity: number): [string, string] {
-  if (severity >= 0.7) return ["Strong", "strong"];
-  if (severity >= 0.4) return ["Moderate", "moderate"];
-  return ["Weak", "weak"];
-}
 
 function bytes(n: number) {
   return n > 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.round(n / 1e3)} KB`;
@@ -61,7 +56,7 @@ function FlagCard({ flag }: { flag: Flag }) {
   const config = useApp((s) => s.config);
   const setView = useApp((s) => s.setView);
   const view = config?.views.find((v) => v.id === flag.view);
-  const [label, cls] = level(flag.severity);
+  const level = severityLevel(flag.severity);
 
   const show = () => {
     if (!view) return;
@@ -70,9 +65,9 @@ function FlagCard({ flag }: { flag: Flag }) {
   };
 
   return (
-    <article className={`flag ${cls}`}>
+    <article className={`flag ${level}`}>
       <header>
-        <span className={`chip ${cls}`}>{label}</span>
+        <span className={`chip ${level}`}>{SEVERITY_LABELS[level]}</span>
         <h3>{flag.title}</h3>
       </header>
       <p>{flag.explanation}</p>

@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Space } from "../api";
 import { drawAnnotation } from "../annotations";
-import { useApp, type Annotation } from "../store";
-import { hover, viewports } from "../viewport";
+import { useApp, type AnnotationDraft } from "../store";
+import { decodeImage, hover, viewports } from "../viewport";
 
 interface Props {
   url: string | null;
@@ -12,8 +12,6 @@ interface Props {
   title: string;
   editable: boolean;
 }
-
-type Draft = Omit<Annotation, "id">;
 
 const SCREEN_STYLE = { lineWidth: 2.5, fontPx: 13 };
 const MIN_ZOOM = 0.25;
@@ -35,7 +33,7 @@ export default function Pane({ url, space, viewId, title, editable }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
-  const draftRef = useRef<Draft | null>(null);
+  const draftRef = useRef<AnnotationDraft | null>(null);
   const dragRef = useRef<{ sx: number; sy: number; cx: number; cy: number } | null>(null);
   const rafRef = useRef(0);
   const sizedRef = useRef(false); // canvas sized by the ResizeObserver yet?
@@ -98,8 +96,8 @@ export default function Pane({ url, space, viewId, title, editable }: Props) {
     ctx.imageSmoothingEnabled = g.scale < 3;
     ctx.drawImage(img, g.ox, g.oy, g.iw * g.scale, g.ih * g.scale);
     const map = (x: number, y: number): [number, number] => [g.ox + x * g.scale, g.oy + y * g.scale];
-    for (const a of latest.current.annotations) if (a.space === space) drawAnnotation(ctx, { ...a, id: "" }, map, SCREEN_STYLE);
-    if (draftRef.current) drawAnnotation(ctx, { ...draftRef.current, id: "" }, map, SCREEN_STYLE);
+    for (const a of latest.current.annotations) if (a.space === space) drawAnnotation(ctx, a, map, SCREEN_STYLE);
+    if (draftRef.current) drawAnnotation(ctx, draftRef.current, map, SCREEN_STYLE);
 
     const h = hover.state;
     if (latest.current.crosshair && h && h.space === space) {
@@ -136,11 +134,8 @@ export default function Pane({ url, space, viewId, title, editable }: Props) {
     let cancelled = false;
     setLoading(true);
     setFailed(false);
-    const img = new Image();
-    img.src = url;
-    img
-      .decode()
-      .then(() => {
+    decodeImage(url)
+      .then((img) => {
         if (cancelled) return;
         imgRef.current = img;
         setLoading(false);
@@ -220,7 +215,7 @@ export default function Pane({ url, space, viewId, title, editable }: Props) {
       return;
     } else if (e.button === 0) {
       const pt: [number, number] = [p.x, p.y];
-      draftRef.current = { kind: tool as Draft["kind"], space, color, text: "", points: tool === "pen" ? [pt] : [pt, pt] };
+      draftRef.current = { kind: tool as AnnotationDraft["kind"], space, color, text: "", points: tool === "pen" ? [pt] : [pt, pt] };
     }
     (e.target as Element).setPointerCapture(e.pointerId);
   };

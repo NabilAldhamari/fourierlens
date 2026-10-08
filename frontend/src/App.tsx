@@ -7,8 +7,8 @@ import Overview from "./components/Overview";
 import StatusBar from "./components/StatusBar";
 import TopBar from "./components/TopBar";
 import Workspace from "./components/Workspace";
-import { useApp, type Tool } from "./store";
-import { viewports } from "./viewport";
+import { useApp, viewsInTab, type Tool } from "./store";
+import { fitAllViewports } from "./viewport";
 
 const TOOL_KEYS: Record<string, Tool> = { v: "move", r: "rect", e: "ellipse", a: "arrow", p: "pen", t: "text" };
 
@@ -60,11 +60,9 @@ export default function App() {
       else if (key in TOOL_KEYS) s.setTool(TOOL_KEYS[key]);
       else if (key === "c") s.toggleCrosshair();
       else if (key === "s") s.toggleCompare();
-      else if (key === "f") {
-        viewports.image.reset();
-        viewports.spectrum.reset();
-      } else if ((key === "[" || key === "]") && s.tab !== "overview") {
-        const views = s.config.views.filter((v) => v.tab === s.tab);
+      else if (key === "f") fitAllViewports();
+      else if ((key === "[" || key === "]") && s.tab !== "overview") {
+        const views = viewsInTab(s.config, s.tab);
         const i = views.findIndex((v) => v.id === s.viewByTab[s.tab]);
         const next = views[(i + (key === "]" ? 1 : -1) + views.length) % views.length];
         s.setView(s.tab, next.id);

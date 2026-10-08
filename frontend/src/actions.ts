@@ -2,7 +2,7 @@
 
 import { api, type LoadedImage } from "./api";
 import { useApp } from "./store";
-import { pixels, viewports } from "./viewport";
+import { fitAllViewports, pixels } from "./viewport";
 
 async function open(load: () => Promise<LoadedImage>) {
   const { setBusy, setError, setImage, setFindings } = useApp.getState();
@@ -10,8 +10,7 @@ async function open(load: () => Promise<LoadedImage>) {
   setError(null);
   try {
     const img = await load();
-    viewports.image.reset();
-    viewports.spectrum.reset();
+    fitAllViewports();
     setImage(img);
     pixels.load(api.originalUrl(img.id)).catch(() => undefined);
     api

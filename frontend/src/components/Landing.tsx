@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { api, type Sample } from "../api";
-import { imageFileFrom, openFile, openSample } from "../actions";
+import { openSample } from "../actions";
 import { useApp } from "../store";
+import { useFilePicker } from "./FilePicker";
 import Icon from "./Icons";
 
 const SAMPLE_TEXT: Record<string, [string, string]> = {
@@ -14,7 +15,7 @@ const SAMPLE_TEXT: Record<string, [string, string]> = {
 export default function Landing() {
   const [samples, setSamples] = useState<Sample[]>([]);
   const busy = useApp((s) => s.busy);
-  const input = useRef<HTMLInputElement>(null);
+  const picker = useFilePicker();
 
   useEffect(() => {
     api.samples().then(setSamples).catch(() => setSamples([]));
@@ -26,20 +27,10 @@ export default function Landing() {
         <Icon name="open" size={34} />
         <h1>Drop a photo to inspect it</h1>
         <p className="muted">or paste it, or</p>
-        <button className="btn primary big" onClick={() => input.current?.click()} disabled={busy}>
+        <button className="btn primary big" onClick={picker.choose} disabled={busy}>
           {busy ? "Opening…" : "Choose a file"}
         </button>
-        <input
-          ref={input}
-          type="file"
-          accept="image/*,.tif,.tiff"
-          hidden
-          onChange={(e) => {
-            const f = imageFileFrom(e.target.files);
-            if (f) openFile(f);
-            e.target.value = "";
-          }}
-        />
+        {picker.input}
         <p className="small muted">PNG, JPEG, WebP, BMP, GIF, TIFF</p>
         <p className="small privacy">
           <Icon name="shield" size={14} /> Runs on this computer. Your images are never uploaded anywhere.
