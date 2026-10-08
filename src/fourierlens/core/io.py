@@ -64,6 +64,47 @@ def _collapse_channels(arr: np.ndarray) -> np.ndarray:
     raise ValueError(f"Unsupported image shape: {arr.shape}")
 
 
+# IJG standard luminance quantization table (quality 50)
+_IJG_LUMA = (
+    16, 11, 10, 16, 24, 40, 51, 61, 12, 12, 14, 19, 26, 58, 60, 55,
+    14, 13, 16, 24, 40, 57, 69, 56, 14, 17, 22, 29, 51, 87, 80, 62,
+    18, 22, 37, 56, 68, 109, 103, 77, 24, 35, 55, 64, 81, 104, 113, 92,
+    49, 64, 78, 87, 103, 121, 120, 101, 72, 92, 95, 98, 112, 100, 103, 99,
+)
+_EXIF_TAGS = {271: "camera_make", 272: "camera_model", 305: "software", 306: "date_time"}
+# metadata keys AI image tools write into PNG/WebP text chunks
+_GENERATOR_KEYS = ("parameters", "prompt", "workflow", "invokeai_metadata", "sd-metadata", "dream")
+
+
+def jpeg_quality(quantization: dict | None) -> int | None:
+    """Estimate the IJG quality factor from the luminance quantization table."""
+    if not quantization or 0 not in quantization:
+        return None
+    scale = 100.0 * sum(quantization[0]) / sum(_IJG_LUMA)
+    q = (200.0 - scale) / 2.0 if scale <= 100.0 else 5000.0 / scale
+    return int(round(min(max(q, 1.0), 100.0)))
+
+
+def _file_facts(im: Image.Image) -> dict:
+    """Metadata a forensic reviewer wants first: compression level, camera, editing software."""
+    facts: dict = {"jpeg_quality": jpeg_quality(getattr(im, "quantization", None))}
+    try:
+        exif = im.getexif()
+    except Exception:  # noqa: BLE001 - malformed EXIF must not block loading
+        exif = {}
+    facts["has_exif"] = bool(exif)
+    for tag, key in _EXIF_TAGS.items():
+        value = exif.get(tag) if exif else None
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", "replace")
+        if value:
+            facts[key] = str(value).strip("\x00 ")[:120]
+    keys = [k for k in im.info if str(k).lower() in _GENERATOR_KEYS]
+    if keys:
+        facts["generator_metadata"] = sorted(str(k) for k in keys)
+    return facts
+
+
 def _check_pixels(width: int, height: int, max_pixels: int | None) -> None:
     if max_pixels is not None and width * height > max_pixels:
         raise ValueError(
@@ -89,10 +130,12 @@ def load_image_bytes(data: bytes, filename: str = "image", max_pixels: int | Non
         raw = _collapse_channels(np.asarray(raw))
         pixels, bit_depth = _normalize_array(raw)
         fmt = "TIFF"
+        facts = {}
     else:
         with Image.open(_stdio.BytesIO(data)) as im:
             _check_pixels(im.width, im.height, max_pixels)
             fmt = im.format or ext.lstrip(".").upper()
+            facts = _file_facts(im)
             if im.mode in ("I;16", "I;16B", "I;16L", "I"):
                 raw = np.asarray(im, dtype=np.uint16 if "16" in im.mode else np.int32)
             elif im.mode in ("L", "RGB"):
@@ -116,6 +159,7 @@ def load_image_bytes(data: bytes, filename: str = "image", max_pixels: int | Non
         "bit_depth": bit_depth,
         "file_size_bytes": len(data),
         "sha256": sha,
+        **facts,
     }
     return LoadedImage(pixels=pixels, meta=meta)
 

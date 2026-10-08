@@ -1,105 +1,126 @@
 """Generate the bundled sample gallery (run once; outputs are committed).
 
-Each sample is designed to teach something specific about the frequency domain
-or to trigger one of the anomaly detectors:
+The samples are synthetic, so they carry no real faces and no licensing
+questions, but each reproduces the traces a real manipulation leaves:
 
-    grating          - single sinusoid: two conjugate dots in the spectrum
-    gratings_mix     - three sinusoids at different frequencies/orientations
-    checkerboard     - harmonics of a square wave
-    natural          - 1/f^2 pink noise: statistics of natural photographs
-    shapes           - edges and flat regions: energy along edge normals
-    periodic_noise   - natural image + sinusoidal interference (peak detector demo)
-    jpeg_artifacts   - heavily compressed JPEG (grid detector demo)
-    upscaled         - 4x bicubic upscale (steep-slope / low-detail demo)
-    sharpened        - over-sharpened natural image (flat-spectrum demo)
+    authentic   - "camera photo": scene + even sensor noise, saved once as JPEG q90
+    blended     - same scene with an oval patch blended in the way face swaps are:
+                  lower resolution, no sensor noise, compressed earlier at q65,
+                  feathered seam; then saved as JPEG q92
+    generated   - "generator output": content upsampled 4x by a transposed
+                  convolution (checkerboard periodicity), PNG with prompt metadata
 """
 
 from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, PngImagePlugin
+from scipy.ndimage import gaussian_filter
 
-SIZE = 512
+W, H = 768, 512
 OUT = Path(__file__).resolve().parents[1] / "samples"
-RNG = np.random.default_rng(42)
+RNG = np.random.default_rng(7)
 
 
-def save(name: str, arr01: np.ndarray, fmt: str = "PNG", **kwargs) -> None:
-    img = Image.fromarray((np.clip(arr01, 0, 1) * 255).astype(np.uint8))
-    path = OUT / f"{name}.{fmt.lower().replace('jpeg', 'jpg')}"
-    img.save(path, fmt, **kwargs)
+def pink(h: int, w: int, alpha: float = 2.0) -> np.ndarray:
+    fy = np.fft.fftfreq(h)[:, None]
+    fx = np.fft.fftfreq(w)[None, :]
+    r = np.hypot(fy, fx)
+    r[0, 0] = 1.0
+    amp = 1.0 / r ** (alpha / 2.0)
+    amp[0, 0] = 0.0
+    field = np.fft.ifft2(amp * np.exp(1j * RNG.uniform(0, 2 * np.pi, (h, w)))).real
+    return (field - field.mean()) / field.std()
+
+
+def scene() -> np.ndarray:
+    """A clean landscape: sky gradient, textured hills, a sun."""
+    y, x = np.mgrid[0:H, 0:W].astype(np.float64)
+    img = np.zeros((H, W, 3))
+    sky = np.clip(y / (H * 0.55), 0, 1)[..., None]
+    img[:] = (1 - sky) * np.array([0.35, 0.55, 0.85]) + sky * np.array([0.75, 0.85, 0.95])
+    sun = np.exp(-((x - 600) ** 2 + (y - 90) ** 2) / (2 * 28.0**2))[..., None]
+    img = img * (1 - sun) + sun * np.array([1.0, 0.95, 0.8])
+
+    horizon = H * 0.5 + 40 * np.sin(x / 110.0) + 18 * np.sin(x / 37.0 + 1.0)
+    ground = gaussian_filter((y > horizon).astype(float), 1.2)[..., None]
+    tex = pink(H, W, 2.4)
+    grass = np.stack([0.32 + 0.07 * tex, 0.45 + 0.08 * tex, 0.2 + 0.04 * tex], axis=-1)
+    shade = np.clip((y - horizon) / (H * 0.5), 0, 1)[..., None]
+    grass = grass * (1.0 - 0.35 * shade)
+    img = img * (1 - ground) + ground * grass
+    return np.clip(img, 0, 1)
+
+
+def jpeg(img01: np.ndarray, quality: int) -> np.ndarray:
+    buf = BytesIO()
+    Image.fromarray((np.clip(img01, 0, 1) * 255 + 0.5).astype(np.uint8)).save(buf, "JPEG", quality=quality)
+    buf.seek(0)
+    return np.asarray(Image.open(buf).convert("RGB"), dtype=np.float64) / 255.0
+
+
+def sensor_noise(shape) -> np.ndarray:
+    return RNG.normal(0, 5.0 / 255, shape)
+
+
+def save_jpeg(name: str, img01: np.ndarray, quality: int) -> None:
+    path = OUT / f"{name}.jpg"
+    Image.fromarray((np.clip(img01, 0, 1) * 255 + 0.5).astype(np.uint8)).save(path, "JPEG", quality=quality)
     print(f"  wrote {path.name}")
 
 
-def coords() -> tuple[np.ndarray, np.ndarray]:
-    y, x = np.mgrid[0:SIZE, 0:SIZE].astype(np.float64)
-    return y, x
+def blended_patch(base: np.ndarray) -> np.ndarray:
+    """Blend an oval patch the way face-swap pipelines do."""
+    y, x = np.mgrid[0:H, 0:W].astype(np.float64)
+    cx, cy, rx, ry = 300, 330, 70, 92
+    inside = (((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2) <= 1.0
+    alpha = gaussian_filter(inside.astype(float), 6.0)[..., None]  # feathered seam
+
+    # "generated face": skin-toned shading + texture, rendered at half resolution
+    tex = pink(H // 2, W // 2, 2.2)
+    yy, xx = np.mgrid[0 : H // 2, 0 : W // 2]
+    light = 0.12 * np.cos((xx - cx / 2) / 30.0)
+    small = np.stack([0.78 + light + 0.05 * tex, 0.6 + light + 0.04 * tex, 0.5 + light + 0.035 * tex], axis=-1)
+    small8 = (np.clip(small, 0, 1) * 255 + 0.5).astype(np.uint8)
+    face = np.asarray(Image.fromarray(small8).resize((W, H), Image.BICUBIC), dtype=np.float64) / 255.0
+    face = jpeg(face, 65)  # comes from a different, more compressed source
+
+    out = base * (1 - alpha) + face * alpha
+    return out + sensor_noise(out.shape) * (1 - alpha)  # the camera noise stops at the seam
 
 
-def pink_noise(alpha: float = 2.0) -> np.ndarray:
-    """1/f^alpha noise field, normalized to [0, 1] - mimics natural image statistics."""
-    fy = np.fft.fftfreq(SIZE)[:, None]
-    fx = np.fft.fftfreq(SIZE)[None, :]
-    r = np.hypot(fy, fx)
-    r[0, 0] = 1.0
-    amplitude = 1.0 / r ** (alpha / 2.0)
-    amplitude[0, 0] = 0.0
-    phase = RNG.uniform(0, 2 * np.pi, (SIZE, SIZE))
-    field = np.fft.ifft2(amplitude * np.exp(1j * phase)).real
-    field = (field - field.min()) / (field.max() - field.min())
-    return field
+def generated(base: np.ndarray) -> Image.Image:
+    """Upsample low-res content with a transposed convolution, as many generators do."""
+    base8 = (np.clip(base, 0, 1) * 255 + 0.5).astype(np.uint8)
+    small = np.asarray(Image.fromarray(base8).resize((W // 4, H // 4), Image.LANCZOS), dtype=np.float64) / 255.0
+    up = np.zeros((H, W, 3))
+    up[::4, ::4] = small  # zero insertion (stride 4)
+    k1 = np.array([0.3, 0.55, 0.75, 1.0, 0.7, 0.5, 0.25])  # learned kernels are not ideal interpolators
+    k = np.outer(k1, k1)
+    from scipy.ndimage import convolve
+
+    for c in range(3):
+        up[:, :, c] = convolve(up[:, :, c], k, mode="wrap") * 16 / k.sum()
+    img = Image.fromarray((np.clip(up, 0, 1) * 255 + 0.5).astype(np.uint8))
+    return img
 
 
 def main() -> None:
     OUT.mkdir(exist_ok=True)
-    y, x = coords()
+    for old in OUT.iterdir():
+        if old.is_file():
+            old.unlink()
+    base = scene()
+    save_jpeg("authentic", base + sensor_noise(base.shape), 90)
+    save_jpeg("blended", blended_patch(base), 95)
 
-    # single grating: 12 cycles across, 30 degrees
-    theta = np.radians(30)
-    f = 12 / SIZE
-    grating = 0.5 + 0.4 * np.sin(2 * np.pi * f * (x * np.cos(theta) + y * np.sin(theta)))
-    save("grating", grating)
-
-    mix = (
-        0.5
-        + 0.20 * np.sin(2 * np.pi * (8 / SIZE) * x)
-        + 0.15 * np.sin(2 * np.pi * (24 / SIZE) * (x * np.cos(np.radians(60)) + y * np.sin(np.radians(60))))
-        + 0.10 * np.sin(2 * np.pi * (48 / SIZE) * y)
-    )
-    save("gratings_mix", mix)
-
-    check = (((x // 32).astype(int) + (y // 32).astype(int)) % 2).astype(np.float64)
-    save("checkerboard", check)
-
-    natural = pink_noise(2.0)
-    save("natural", natural)
-
-    shapes_img = Image.new("L", (SIZE, SIZE), 40)
-    d = ImageDraw.Draw(shapes_img)
-    d.rectangle([60, 80, 220, 240], fill=200)
-    d.ellipse([260, 120, 460, 320], fill=140)
-    d.rectangle([120, 320, 420, 380], fill=230)
-    d.polygon([(80, 470), (180, 300), (280, 470)], fill=90)
-    save("shapes", np.asarray(shapes_img, dtype=np.float64) / 255.0)
-
-    interference = 0.12 * np.sin(2 * np.pi * (56 / SIZE) * (x * np.cos(np.radians(15)) + y * np.sin(np.radians(15))))
-    save("periodic_noise", np.clip(natural * 0.85 + 0.075 + interference, 0, 1))
-
-    jpeg_src = Image.fromarray((np.clip(pink_noise(1.9), 0, 1) * 255).astype(np.uint8))
-    jpeg_src.save(OUT / "jpeg_artifacts.jpg", "JPEG", quality=12)
-    print("  wrote jpeg_artifacts.jpg")
-
-    small = Image.fromarray((pink_noise(2.0)[:128, :128] * 255).astype(np.uint8))
-    up = small.resize((SIZE, SIZE), Image.BICUBIC)
-    save("upscaled", np.asarray(up, dtype=np.float64) / 255.0)
-
-    sharp = Image.fromarray((natural * 255).astype(np.uint8)).filter(
-        ImageFilter.UnsharpMask(radius=2, percent=400, threshold=0)
-    )
-    noisy = np.asarray(sharp, dtype=np.float64) / 255.0 + RNG.normal(0, 0.06, (SIZE, SIZE))
-    save("sharpened", np.clip(noisy, 0, 1))
+    info = PngImagePlugin.PngInfo()
+    info.add_text("parameters", "a field of grass at sunset, Steps: 30, Sampler: Euler a, CFG scale: 7 (synthetic sample)")
+    generated(base).save(OUT / "generated.png", pnginfo=info)
+    print("  wrote generated.png")
 
 
 if __name__ == "__main__":

@@ -1,10 +1,11 @@
 """Pure-NumPy compute core: no web dependencies.
 
 Modules:
-    io        - image loading/normalization and metadata extraction
+    io        - image loading/normalization and file facts (JPEG quality, EXIF)
+    forensics - pixel-level forensic views and local inconsistency checks
     windows   - 2D window functions (Hann, Hamming, Blackman, Tukey)
-    fft       - spectra, band-energy maps, filtered reconstructions
-    masks     - frequency-domain mask construction from JSON specs
+    fft       - spectra helpers
     metrics   - scalar/profile spectral metrics for research export
     anomalies - automatic spectral anomaly detectors with explanations
+    batch     - headless dataset analysis used by the CLI
 """

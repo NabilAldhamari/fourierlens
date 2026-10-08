@@ -4,10 +4,6 @@ services:
     image: fourierlens:latest
     container_name: fourierlens
     ports:
-      # loopback only: the app can browse and read local files, so never expose it to the network
+      # loopback only: the app has no login, so keep it off the network
       - "127.0.0.1:8321:8321"
-    # Optional: mount a local dataset folder so batch mode can read it at /data.
-    # Point the batch "folder" field at /data inside the app.
-    volumes:
-      - ./data:/data:ro
     restart: unless-stopped
