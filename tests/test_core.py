@@ -137,3 +137,14 @@ def test_radial_profile_monotone_for_pink_noise():
     assert len(freqs) == 16 and len(prof) == 16
     alpha, r2 = spectral_slope(freqs, prof)
     assert alpha == pytest.approx(0.0, abs=0.05)  # flat PSD -> slope 0
+
+
+def test_signed_16bit_tiff_reports_16_bits():
+    import tifffile
+
+    arr = np.random.default_rng(9).integers(-1000, 1000, (16, 16)).astype(np.int16)
+    buf = io.BytesIO()
+    tifffile.imwrite(buf, arr)
+    img = load_image_bytes(buf.getvalue(), "signed.tif")
+    assert img.meta["bit_depth"] == 16
+    assert img.pixels.min() == 0.0 and img.pixels.max() == 1.0

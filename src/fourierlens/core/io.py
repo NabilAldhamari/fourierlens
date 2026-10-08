@@ -16,9 +16,10 @@ Image.MAX_IMAGE_PIXELS = 512 * 1024 * 1024  # allow large scientific images
 SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
 
 # Rec. 709 luma weights
-_LUMA = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+LUMA_WEIGHTS = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
 
-CHANNEL_MODES = ("luma", "r", "g", "b")
+_CHANNEL_INDEX = {"r": 0, "g": 1, "b": 2}
+CHANNEL_MODES = ("luma", *_CHANNEL_INDEX)
 
 
 @dataclass
@@ -38,10 +39,11 @@ def _normalize_array(arr: np.ndarray) -> tuple[np.ndarray, int]:
     if arr.dtype == np.uint32:
         return arr.astype(np.float32) / np.float32(2**32 - 1), 32
     if arr.dtype in (np.int16, np.int32):
+        bit_depth = arr.itemsize * 8
         arr = arr.astype(np.float64)
         lo, hi = arr.min(), arr.max()
         span = (hi - lo) if hi > lo else 1.0
-        return ((arr - lo) / span).astype(np.float32), 16 if arr.itemsize == 2 else 32
+        return ((arr - lo) / span).astype(np.float32), bit_depth
     if np.issubdtype(arr.dtype, np.floating):
         arr = np.nan_to_num(arr.astype(np.float32))
         hi = float(arr.max()) if arr.size else 1.0
@@ -56,9 +58,7 @@ def _collapse_channels(arr: np.ndarray) -> np.ndarray:
     if arr.ndim == 2:
         return arr
     if arr.ndim == 3:
-        if arr.shape[2] == 1:
-            return arr[:, :, 0]
-        if arr.shape[2] == 2:  # gray + alpha
+        if arr.shape[2] <= 2:  # gray, or gray + alpha
             return arr[:, :, 0]
         return arr[:, :, :3]  # drop alpha / extra channels
     raise ValueError(f"Unsupported image shape: {arr.shape}")
@@ -177,10 +177,10 @@ def to_channel(pixels: np.ndarray, mode: str = "luma") -> np.ndarray:
     if pixels.ndim == 2:
         return pixels
     if mode == "luma":
-        return pixels @ _LUMA
-    idx = {"r": 0, "g": 1, "b": 2}.get(mode)
-    if idx is None:
+        return pixels @ LUMA_WEIGHTS
+    if mode not in _CHANNEL_INDEX:
         raise ValueError(f"Unknown channel mode {mode!r}; expected one of {CHANNEL_MODES}")
+    idx = _CHANNEL_INDEX[mode]
     return np.ascontiguousarray(pixels[:, :, idx])
 
 

@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { Config, Findings, LoadedImage, Space } from "./api";
+import type { Config, Findings, LoadedImage, Space, ViewInfo } from "./api";
 
 export type Tool = "move" | "rect" | "ellipse" | "arrow" | "pen" | "text";
 export type ShapeKind = Exclude<Tool, "move">;
@@ -13,6 +13,8 @@ export interface Annotation {
   points: [number, number][];
   text: string;
 }
+
+export type AnnotationDraft = Omit<Annotation, "id">;
 
 export const COLORS = ["#ff4d6d", "#ffd23f", "#3ee8d0", "#ffffff"];
 
@@ -42,7 +44,7 @@ interface State {
   toggleCrosshair(): void;
   setTool(t: Tool): void;
   setColor(c: string): void;
-  addAnnotation(a: Omit<Annotation, "id">): void;
+  addAnnotation(a: AnnotationDraft): void;
   updateAnnotation(id: string, patch: Partial<Annotation>): void;
   removeAnnotation(id: string): void;
   clearAnnotations(): void;
@@ -110,4 +112,18 @@ export const useApp = create<State>((set, get) => ({
   setError: (error) => set({ error }),
   setBusy: (busy) => set({ busy }),
 }));
+
+export function viewsInTab(config: Config, tab: string): ViewInfo[] {
+  return config.views.filter((v) => v.tab === tab);
+}
+
+/** The view selected in the current tab, or null on the overview. */
+export function useCurrentView(): ViewInfo | null {
+  const config = useApp((s) => s.config);
+  const tab = useApp((s) => s.tab);
+  const selected = useApp((s) => s.viewByTab[s.tab]);
+  if (!config) return null;
+  const views = viewsInTab(config, tab);
+  return views.find((v) => v.id === selected) ?? views[0] ?? null;
+}
 

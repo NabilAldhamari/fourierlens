@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../api";
-import { imageFileFrom, openFile } from "../actions";
 import { downloadSideBySide, downloadSingle, type Layer } from "../exportImage";
-import { useApp } from "../store";
+import { MODERATE_SEVERITY } from "../severity";
+import { useApp, useCurrentView } from "../store";
+import { useFilePicker } from "./FilePicker";
 import Icon from "./Icons";
 
 export const SHORTCUTS: [string, string][] = [
@@ -16,13 +17,6 @@ export const SHORTCUTS: [string, string][] = [
   ["Ctrl/⌘ + Z", "Undo"],
 ];
 
-function useCurrentView() {
-  const config = useApp((s) => s.config);
-  const tab = useApp((s) => s.tab);
-  const viewByTab = useApp((s) => s.viewByTab);
-  return config?.views.find((v) => v.id === viewByTab[tab]) ?? null;
-}
-
 export default function TopBar() {
   const config = useApp((s) => s.config);
   const image = useApp((s) => s.image);
@@ -30,7 +24,7 @@ export default function TopBar() {
   const setTab = useApp((s) => s.setTab);
   const findings = useApp((s) => s.findings);
   const busy = useApp((s) => s.busy);
-  const input = useRef<HTMLInputElement>(null);
+  const picker = useFilePicker();
   const [menu, setMenu] = useState<"download" | "help" | null>(null);
 
   useEffect(() => {
@@ -40,7 +34,7 @@ export default function TopBar() {
     return () => window.removeEventListener("pointerdown", close);
   }, [menu]);
 
-  const flagCount = findings?.flags.filter((f) => f.severity >= 0.4).length ?? 0;
+  const flagCount = findings?.flags.filter((f) => f.severity >= MODERATE_SEVERITY).length ?? 0;
 
   return (
     <header className="topbar">
@@ -71,20 +65,10 @@ export default function TopBar() {
           {image.meta.filename}
         </span>
       )}
-      <button className="btn" onClick={() => input.current?.click()} disabled={busy} title="Open another image">
+      <button className="btn" onClick={picker.choose} disabled={busy} title="Open another image">
         <Icon name="open" /> Open
       </button>
-      <input
-        ref={input}
-        type="file"
-        accept="image/*,.tif,.tiff"
-        hidden
-        onChange={(e) => {
-          const f = imageFileFrom(e.target.files);
-          if (f) openFile(f);
-          e.target.value = "";
-        }}
-      />
+      {picker.input}
       {image && (
         <div className="menu-wrap" onPointerDown={(e) => e.stopPropagation()}>
           <button className="btn primary" onClick={() => setMenu(menu === "download" ? null : "download")}>

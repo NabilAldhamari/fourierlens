@@ -1,7 +1,9 @@
 // Drawing annotations: shared by the live panes and the PNG export, so what
 // you see on screen is exactly what gets downloaded.
 
-import type { Annotation } from "./store";
+import type { Annotation, AnnotationDraft } from "./store";
+
+export const FONT_FAMILY = `system-ui, -apple-system, "Segoe UI", sans-serif`;
 
 export interface DrawStyle {
   lineWidth: number;
@@ -12,7 +14,7 @@ type Map = (x: number, y: number) => [number, number];
 
 function label(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, color: string, style: DrawStyle) {
   if (!text) return;
-  ctx.font = `600 ${style.fontPx}px system-ui, -apple-system, "Segoe UI", sans-serif`;
+  ctx.font = `600 ${style.fontPx}px ${FONT_FAMILY}`;
   const pad = style.fontPx * 0.35;
   const lines = text.split("\n");
   const w = Math.max(...lines.map((l) => ctx.measureText(l).width)) + pad * 2;
@@ -29,7 +31,7 @@ function label(ctx: CanvasRenderingContext2D, text: string, x: number, y: number
   lines.forEach((l, i) => ctx.fillText(l, x + pad * 1.4, y + pad * 0.6 + i * lh));
 }
 
-export function drawAnnotation(ctx: CanvasRenderingContext2D, a: Annotation, map: Map, style: DrawStyle) {
+export function drawAnnotation(ctx: CanvasRenderingContext2D, a: AnnotationDraft, map: Map, style: DrawStyle) {
   const pts = a.points.map(([x, y]) => map(x, y));
   ctx.save();
   ctx.strokeStyle = a.color;

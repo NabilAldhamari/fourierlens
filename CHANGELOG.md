@@ -20,6 +20,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versio
 ### Removed
 - The Fourier explorer's filtering playground, band-energy overlays, progressive reconstruction, window and colormap options, pre-filters, the Batch page, the two-image Compare page, and the server-side folder browser. The headless `fourierlens batch` and `fourierlens analyze` commands remain.
 
+### Fixed
+- Signed 16-bit TIFFs reported a bit depth of 32.
+
 ## [1.2.0] - 2026-10-02
 
 ### Added
